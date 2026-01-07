@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<odoo>
+    <!--    mysql connector form view-->
+    <record id="mysql_connector_view_form" model="ir.ui.view">
+        <field name="model">mysql.connector</field>
+        <field name="arch" type="xml">
+            <form>
+                <header>
+                    <button name="action_sync_table" type="object" string="Sync Table"
+                            class="oe_highlight" invisible="state == 'draft'"/>
+                    <button name="action_fetch_data" type="object" string="Fetch Data"
+                            class="oe_highlight"/>
+                    <button name="action_download_csv" type="object" string="Download CSV"
+                            class="btn-primary" invisible="state == 'draft'"/>
+                    <button name="action_clean_data" type="object" string="Clean Existing Data"
+                            class="btn-secondary" invisible="state == 'draft'"/>
+                    <field name="state" widget="statusbar" statusbar_visible="draft,fetched,sync"/>
+                </header>
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="name"/>
+                            <field name="credential_id" options="{'no_create': True}"/>
+                        </group>
+                        <group>
+                            <field name="sql_table"/>
+                            <field name="model_id" options="{'no_create': True}"/>
+                            <field name="is_fetched" invisible="True"/>
+                        </group>
+                    </group>
+                    <notebook invisible="is_fetched == False" >
+                        <page string="Data Mapping">
+                            <field name="sync_ids">
+                                <tree create="false" editable="bottom">
+                                    <field name="mysql_field" readonly="1"/>
+                                    <field name="ir_field_id" options="{'no_create': True}"  />
+                                    <field name="ref_table" readonly="1"/>
+                                    <field name="ref_col" readonly="1"/>
+                                    <field name="ref_col_name" required="ref_col != False"/>
+                                    <field name="model_id"  column_invisible="True"/>
+                                    <field name="foreign_key"  column_invisible="True"/>
+                                </tree>
+                            </field>
+                        </page>
+                        <page string="Sync History">
+                            <group>
+                                <field name="last_sync_date"/>
+                                <field name="last_sync_message"/>
+                            </group>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+    <!--    mysql connector tree view-->
+    <record id="mysql_connector_view_tree" model="ir.ui.view">
+        <field name="model">mysql.connector</field>
+        <field name="arch" type="xml">
+            <tree>
+                <field name="name"/>
+                <field name="credential_id"/>
+                <field name="sql_table"/>
+                <field name="model_id"/>
+            </tree>
+        </field>
+    </record>
+    <!--    mysql connector action-->
+    <record id="mysql_connector_action" model="ir.actions.act_window">
+        <field name="name">Connector</field>
+        <field name="res_model">mysql.connector</field>
+        <field name="view_mode">tree,form</field>
+    </record>
+    <!--    mysql connector menu-->
+    <menuitem id="mysql_connector_menu"
+              name="Connector"
+              action="mysql_connector_action"
+              parent="mysql_connector_menu_configuration"
+              sequence="1"/>
+</odoo>

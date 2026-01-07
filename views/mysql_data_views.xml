@@ -1,0 +1,263 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- ORDERS VIEWS -->
+    <record id="view_mysql_order_tree" model="ir.ui.view">
+        <field name="name">mysql.order.tree</field>
+        <field name="model">mysql.order</field>
+        <field name="arch" type="xml">
+            <tree string="Orders" export_xlsx="1">
+                <field name="order_code"/>
+                <field name="customer_name"/>
+                <field name="order_total" sum="Total Amount"/>
+                <field name="payment_status"/>
+                <field name="order_created_at"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="view_mysql_order_form" model="ir.ui.view">
+        <field name="name">mysql.order.form</field>
+        <field name="model">mysql.order</field>
+        <field name="arch" type="xml">
+            <form string="Order">
+                <sheet>
+                    <group>
+                        <field name="order_code"/>
+                        <field name="customer_name"/>
+                        <field name="order_total"/>
+                        <field name="payment_status"/>
+                        <field name="order_created_at"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_mysql_order_pivot" model="ir.ui.view">
+        <field name="name">mysql.order.pivot</field>
+        <field name="model">mysql.order</field>
+        <field name="arch" type="xml">
+            <pivot string="Orders Analysis" sample="1">
+                <field name="payment_status" type="col"/>
+                <field name="store_name" type="row"/>
+                <field name="order_total" type="measure"/>
+            </pivot>
+        </field>
+    </record>
+
+    <record id="view_mysql_order_graph" model="ir.ui.view">
+        <field name="name">mysql.order.graph</field>
+        <field name="model">mysql.order</field>
+        <field name="arch" type="xml">
+            <graph string="Orders Dashboard" type="bar">
+                <field name="store_name"/>
+                <field name="order_total" type="measure"/>
+            </graph>
+        </field>
+    </record>
+
+    <!-- PRODUCTS VIEWS -->
+    <record id="view_mysql_product_tree" model="ir.ui.view">
+        <field name="name">mysql.product.tree</field>
+        <field name="model">mysql.product</field>
+        <field name="arch" type="xml">
+            <tree string="Products" export_xlsx="1">
+                <field name="product_name"/>
+                <field name="product_sku"/>
+                <field name="product_slug"/>
+                <field name="store_id"/>
+                <field name="product_price"/>
+                <field name="product_quantity"/>
+                <field name="html_url" widget="url" string="Product URL"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="view_mysql_product_form" model="ir.ui.view">
+        <field name="name">mysql.product.form</field>
+        <field name="model">mysql.product</field>
+        <field name="arch" type="xml">
+            <form string="Product">
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="product_name"/>
+                            <field name="product_sku"/>
+                            <field name="product_slug"/>
+                        </group>
+                        <group>
+                            <field name="store_id"/>
+                            <field name="product_price"/>
+                            <field name="product_quantity"/>
+                            <field name="html_url" widget="url"/>
+                        </group>
+                    </group>
+                    <group string="Media">
+                        <field name="image_url" widget="image" options="{'size': [128, 128]}"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_mysql_product_pivot" model="ir.ui.view">
+        <field name="name">mysql.product.pivot</field>
+        <field name="model">mysql.product</field>
+        <field name="arch" type="xml">
+            <pivot string="Products Analysis" sample="1">
+                <field name="product_name" type="row"/>
+                <field name="product_quantity" type="measure"/>
+            </pivot>
+        </field>
+    </record>
+
+    <record id="view_mysql_product_search" model="ir.ui.view">
+        <field name="name">mysql.product.search</field>
+        <field name="model">mysql.product</field>
+        <field name="arch" type="xml">
+            <search string="Products Search">
+                <field name="product_name"/>
+                <field name="product_sku"/>
+                <field name="product_slug"/>
+                <field name="store_id"/>
+                <field name="html_url"/>
+                <filter string="With Quantity" name="qty_positive" domain="[('product_quantity', '>', 0)]"/>
+                <group expand="0" string="Group By">
+                    <filter string="Store ID" name="group_by_store" context="{'group_by':'store_id'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <!-- ORDER DETAILS VIEWS -->
+    <record id="view_mysql_order_detail_tree" model="ir.ui.view">
+        <field name="name">mysql.order.detail.tree</field>
+        <field name="model">mysql.order.detail</field>
+        <field name="arch" type="xml">
+            <tree string="Order Details" export_xlsx="1">
+                <field name="order_linked_id"/>
+                <field name="product_name"/>
+                <field name="product_sku"/>
+                <field name="total" sum="Total"/>
+                <field name="currency_code"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="view_mysql_order_detail_pivot" model="ir.ui.view">
+        <field name="name">mysql.order.detail.pivot</field>
+        <field name="model">mysql.order.detail</field>
+        <field name="arch" type="xml">
+            <pivot string="Order Details Analysis" sample="1">
+                <field name="product_name" type="row"/>
+                <field name="total" type="measure"/>
+            </pivot>
+        </field>
+    </record>
+
+    <!-- POS VIEWS -->
+    <record id="view_mysql_pos_tree" model="ir.ui.view">
+        <field name="name">mysql.pos.tree</field>
+        <field name="model">mysql.pos</field>
+        <field name="arch" type="xml">
+            <tree string="POS Data" export_xlsx="1">
+                <field name="pos_name_en"/>
+                <field name="pos_name_sales_person"/>
+                <field name="project_id"/>
+            </tree>
+        </field>
+    </record>
+
+    <!-- COMBINED REPORT VIEWS -->
+    <record id="view_mysql_order_report_tree" model="ir.ui.view">
+        <field name="name">mysql.order.report.tree</field>
+        <field name="model">mysql.order.report</field>
+        <field name="arch" type="xml">
+            <tree string="Orders Analysis (Joined)" create="false" delete="false" export_xlsx="1">
+                <field name="order_code"/>
+                <field name="order_created_at"/>
+                <field name="customer_name"/>
+                <field name="product_name"/>
+                <field name="product_slug" optional="hide"/>
+                <field name="line_total" sum="Total Lines"/>
+                <field name="payment_status"/>
+                <field name="store_name"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="view_mysql_order_report_pivot" model="ir.ui.view">
+        <field name="name">mysql.order.report.pivot</field>
+        <field name="model">mysql.order.report</field>
+        <field name="arch" type="xml">
+            <pivot string="Orders Analysis (Joined)" sample="1" display_quantity="1">
+                <field name="store_name" type="row"/>
+                <field name="product_name" type="row"/>
+                <field name="line_total" type="measure"/>
+            </pivot>
+        </field>
+    </record>
+
+    <record id="view_mysql_order_report_search" model="ir.ui.view">
+        <field name="name">mysql.order.report.search</field>
+        <field name="model">mysql.order.report</field>
+        <field name="arch" type="xml">
+            <search string="Orders Analysis (Joined)">
+                <field name="order_code"/>
+                <field name="customer_name"/>
+                <field name="product_name"/>
+                <field name="product_slug"/>
+                <field name="store_name"/>
+                <field name="order_created_at"/>
+                <separator/>
+                <filter string="Paid Orders" name="paid_orders" domain="[('payment_status', '=', 'paid')]"/>
+                <filter string="Pending Orders" name="pending_orders" domain="[('payment_status', '!=', 'paid')]"/>
+                <separator/>
+                <filter string="Store" name="group_by_store" context="{'group_by':'store_name'}"/>
+                <filter string="Product" name="group_by_product" context="{'group_by':'product_name'}"/>
+                <filter string="Customer" name="group_by_customer" context="{'group_by':'customer_name'}"/>
+                <filter string="Status" name="group_by_status" context="{'group_by':'payment_status'}"/>
+                <filter string="Created At" name="group_by_created" context="{'group_by':'order_created_at'}"/>
+            </search>
+        </field>
+    </record>
+
+    <!-- ACTIONS -->
+    <record id="action_mysql_orders" model="ir.actions.act_window">
+        <field name="name">Orders</field>
+        <field name="res_model">mysql.order</field>
+        <field name="view_mode">tree,pivot,graph,form</field>
+    </record>
+
+    <record id="action_mysql_order_details" model="ir.actions.act_window">
+        <field name="name">Order Details</field>
+        <field name="res_model">mysql.order.detail</field>
+        <field name="view_mode">tree,pivot,form</field>
+    </record>
+
+    <record id="action_mysql_products" model="ir.actions.act_window">
+        <field name="name">Products</field>
+        <field name="res_model" >mysql.product</field>
+        <field name="view_mode">tree,pivot,form</field>
+    </record>
+
+    <record id="action_mysql_pos" model="ir.actions.act_window">
+        <field name="name">POS Analysis</field>
+        <field name="res_model">mysql.pos</field>
+        <field name="view_mode">tree,form</field>
+    </record>
+
+    <record id="action_mysql_order_report" model="ir.actions.act_window">
+        <field name="name">Orders Analysis (Joined)</field>
+        <field name="res_model">mysql.order.report</field>
+        <field name="view_mode">tree,pivot,graph</field>
+    </record>
+
+    <!-- MENU STRUCTURE -->
+    <menuitem id="menu_mysql_dashboard_root" name="MySQL Dashboard" sequence="10" web_icon="odoo_mysql_connector,static/description/icon.png"/>
+    <menuitem id="menu_mysql_orders" name="Orders" parent="menu_mysql_dashboard_root" action="action_mysql_orders" sequence="10"/>
+    <menuitem id="menu_mysql_order_details" name="Order Details" parent="menu_mysql_dashboard_root" action="action_mysql_order_details" sequence="15"/>
+    <menuitem id="menu_mysql_order_report" name="Orders Analysis (Joined)" parent="menu_mysql_dashboard_root" action="action_mysql_order_report" sequence="18"/>
+    <menuitem id="menu_mysql_products" name="Products" parent="menu_mysql_dashboard_root" action="action_mysql_products" sequence="20"/>
+    <menuitem id="menu_mysql_pos" name="POS Data" parent="menu_mysql_dashboard_root" action="action_mysql_pos" sequence="30"/>
+</odoo>
