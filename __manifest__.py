@@ -20,13 +20,13 @@
 #
 ################################################################################
 {
-    'name': "Odoo Mysql Connector",
+    'name': "Odoo MySDB Connector",
     'version': '17.0.1.0.0',
     'category': 'Extra Tools',
-    'summary': """This module will help you to import the data from Mysql 
+    'summary': """This module will help you to import the data from MySDB 
      database.""",
     'description': """This module will assist you in importing data from 
-     a MySQL database, providing a seamless and efficient solution for 
+     a MySDB database, providing a seamless and efficient solution for 
      integrating your existing data into the Odoo system.""",
     'author': 'Cybrosys Techno Solutions',
     'company': 'Cybrosys Techno Solutions',
@@ -34,10 +34,12 @@
     'website': 'https://www.cybrosys.com',
     'depends': ['base', 'spreadsheet', 'board'],
     'data': [
-        'security/ir.model.access.csv',
-        'views/mysql_credential_views.xml',
-        'views/mysql_connector_views.xml',
-        'views/mysql_data_views.xml',
+        
+        'security/security_rules.xml',
+        'data/ir_cron_data.xml',
+        'views/mysdb_credential_views.xml',
+        'views/mysdb_connector_views.xml',
+        'views/mysdb_data_views.xml',
     ],
     'external_dependencies': {
         'python': ['mysql-connector-python', 'cryptography']
@@ -48,4 +50,6 @@
     'auto_install': False,
     'application': True,
 }
+
+
 

@@ -29,10 +29,10 @@ class ImportedData(models.Model):
 
     model_id = fields.Many2one('ir.model', string='Model',
                                help='Name of the model', index=True)
-    mysql_ref = fields.Char(string='Mysql Reference',
-                            help='ID of the record in mysql database', index=True)
-    mysql_table = fields.Char(string='Mysql Table',
-                              help='Name of the table in mysql database')
+    mysdb_ref = fields.Char(string='MySDB Reference',
+                            help='ID of the record in mysdb database', index=True)
+    mysdb_table = fields.Char(string='MySDB Table',
+                              help='Name of the table in mysdb database')
     log_note = fields.Text(string='Log Note',
                            help='Log note regarding the importing')
     odoo_ref = fields.Integer(string='Odoo Reference',

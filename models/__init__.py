@@ -19,8 +19,8 @@
 #    If not, see <http://www.gnu.org/licenses/>.
 #
 ################################################################################
-from . import mysql_data_models
+from . import mysdb_data_models
 from . import imported_data
-from . import mysql_connector
-from . import mysql_credential
+from . import mysdb_connector
+from . import mysdb_credential
 from . import sync_table

@@ -27,16 +27,16 @@ class SyncTable(models.Model):
     _name = 'sync.table'
     _description = 'Sync Table'
 
-    mysql_field = fields.Char(string='Mysql Field',
-                              help='Name of the field in Mysql database')
+    mysql_field = fields.Char(string='MySDB Field',
+                              help='Name of the field in MySDB database')
     data_type = fields.Char(string='Datatype',
-                            help='Data type of the field in mysql')
-    connection_id = fields.Many2one('mysql.connector', string='Connection',
+                            help='Data type of the field in mysdb')
+    connection_id = fields.Many2one('mysdb.connector', string='Connection',
                                     help='Connection corresponds to mapping')
     model_id = fields.Many2one(string='Model Name', help='Name of the model',
                                related='connection_id.model_id')
     ir_field_id = fields.Many2one('ir.model.fields', string='Odoo Field',
-                                  help='Name of the field in Mysql database',
+                                  help='Name of the field in MySDB database',
                                   domain="[('model_id', '=', model_id)]")
     ref_table = fields.Char(string='Reference Table',
                             help='Name of the reference table having '
