@@ -1,0 +1,647 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- ORDERS VIEWS -->
+    <record id="view_mysdb_order_tree" model="ir.ui.view">
+        <field name="name">mysdb.order.tree</field>
+        <field name="model">mysdb.order</field>
+        <field name="priority">1</field>
+        <field name="arch" type="xml">
+            <tree string="Orders" export_xlsx="1">
+                <field name="order_code"/>
+                <field name="store_id" string="Store Code"/>
+                <field name="store_name"/>
+                <field name="customer_name"/>
+                <field name="order_total" sum="Total Amount"/>
+                <field name="payment_status"/>
+                <field name="order_created_at"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="view_mysdb_order_form" model="ir.ui.view">
+        <field name="name">mysdb.order.form</field>
+        <field name="model">mysdb.order</field>
+        <field name="priority">1</field>
+        <field name="arch" type="xml">
+            <form string="Order">
+                <sheet>
+                    <group>
+                        <group string="Order Info">
+                            <field name="order_code"/>
+                            <field name="order_id"/>
+                            <field name="order_created_at"/>
+                            <field name="payment_status"/>
+                        </group>
+                        <group string="Store Info">
+                            <field name="store_id" string="Store Code"/>
+                            <field name="store_name"/>
+                            <field name="store_url" widget="url"/>
+                        </group>
+                        <group string="Customer Info">
+                            <field name="customer_name"/>
+                            <field name="customer_email"/>
+                            <field name="customer_mobile"/>
+                        </group>
+                        <group string="Financials">
+                            <field name="order_total"/>
+                            <field name="currency_code"/>
+                            <field name="transaction_currency_code"/>
+                            <field name="transaction_reference"/>
+                            <field name="transaction_amount"/>
+                            <field name="transaction_amount_string"/>
+                        </group>
+                        <group string="Payment &amp; Source">
+                            <field name="payment_method_name"/>
+                            <field name="payment_method_code"/>
+                            <field name="payment_method_type"/>
+                            <field name="source"/>
+                            <field name="source_code"/>
+                            <field name="is_potential_fraud"/>
+                        </group>
+                        <group string="Timestamps">
+                            <field name="issue_date"/>
+                            <field name="order_created_at"/>
+                            <field name="order_updated_at"/>
+                            <field name="created_at"/>
+                            <field name="updated_at"/>
+                        </group>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_mysdb_order_pivot" model="ir.ui.view">
+        <field name="name">mysdb.order.pivot</field>
+        <field name="model">mysdb.order</field>
+        <field name="arch" type="xml">
+            <pivot string="Orders Analysis" sample="1">
+                <field name="store_name" type="row"/>
+                <field name="payment_status" type="row"/>
+                <field name="order_created_at" interval="month" type="col"/>
+                <field name="order_total" type="measure"/>
+            </pivot>
+        </field>
+    </record>
+
+    <!-- ORDER DETAILS VIEWS -->
+    <record id="view_mysdb_order_detail_tree" model="ir.ui.view">
+        <field name="name">mysdb.order.detail.tree</field>
+        <field name="model">mysdb.order.detail</field>
+        <field name="priority">1</field>
+        <field name="arch" type="xml">
+            <tree string="Order Details" export_xlsx="1">
+                <field name="order_linked_id"/>
+                <field name="product_name"/>
+                <field name="product_sku"/>
+                <field name="total" sum="Total"/>
+                <field name="currency_code"/>
+                <field name="order_detail_uuid" optional="hide"/>
+                <field name="invoice_link" widget="url" optional="hide"/>
+                <field name="created_at" optional="hide"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="view_mysdb_order_detail_form" model="ir.ui.view">
+        <field name="name">mysdb.order.detail.form</field>
+        <field name="model">mysdb.order.detail</field>
+        <field name="priority">1</field>
+        <field name="arch" type="xml">
+            <form string="Order Detail">
+                <sheet>
+                    <group>
+                        <group string="Product Info">
+                            <field name="product_name"/>
+                            <field name="product_sku"/>
+                            <field name="order_linked_id"/>
+                            <field name="order_detail_uuid"/>
+                        </group>
+                        <group string="Financials">
+                            <field name="total"/>
+                            <field name="currency_code"/>
+                            <field name="invoice_link" widget="url"/>
+                        </group>
+                        <group string="System Info">
+                            <field name="store_id"/>
+                            <field name="created_at"/>
+                            <field name="updated_at"/>
+                        </group>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- PRODUCTS VIEWS -->
+    <record id="view_mysdb_product_tree" model="ir.ui.view">
+        <field name="name">mysdb.product.tree</field>
+        <field name="model">mysdb.product</field>
+        <field name="priority">1</field>
+        <field name="arch" type="xml">
+            <tree string="Products" export_xlsx="1">
+                <field name="product_id"/>
+                <field name="product_name"/>
+                <field name="product_name_ar"/>
+                <field name="product_sku"/>
+                <field name="product_slug"/>
+                <field name="store_id"/>
+                <field name="product_price"/>
+                <field name="product_quantity"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="view_mysdb_product_search" model="ir.ui.view">
+        <field name="name">mysdb.product.search</field>
+        <field name="model">mysdb.product</field>
+        <field name="arch" type="xml">
+            <search string="Product Search">
+                <field name="product_name"/>
+                <field name="product_name_ar"/>
+                <field name="product_id"/>
+                <field name="product_sku"/>
+                <field name="product_slug"/>
+                <field name="store_id" string="Store"/>
+                
+                <separator/>
+                <filter string="Products Without Project" name="filter_no_project" 
+                        domain="[('has_project', '=', False)]"
+                        help="Show only products not assigned to any project"/>
+                <filter string="Products Without Marketing" name="filter_no_marketing" 
+                        domain="[('has_marketing', '=', False)]"
+                        help="Show only products not assigned to any marketing account"/>
+                <filter string="Incomplete Assignment" name="filter_incomplete" 
+                        domain="[('assignment_status', 'in', ['partial', 'none'])]"
+                        help="Show products with partial or no assignment"/>
+                <filter string="Complete Assignment" name="filter_complete" 
+                        domain="[('assignment_status', '=', 'complete')]"
+                        help="Show products with both project and marketing"/>
+                
+                <separator/>
+                <group expand="0" string="Group By">
+                    <filter string="Store" name="group_by_store" context="{'group_by': 'store_id'}"/>
+                    <filter string="Assignment Status" name="group_by_status" context="{'group_by': 'assignment_status'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <!-- POS VIEWS -->
+    <record id="view_mysdb_pos_tree" model="ir.ui.view">
+        <field name="name">mysdb.pos.tree</field>
+        <field name="model">mysdb.pos</field>
+        <field name="priority">1</field>
+        <field name="arch" type="xml">
+            <tree string="POS Data" export_xlsx="1">
+                <field name="pos_name_en"/>
+                <field name="pos_name_sales_person"/>
+                <field name="project_id"/>
+            </tree>
+        </field>
+    </record>
+
+    <!-- STORE VIEWS -->
+    <record id="view_mysdb_store_tree" model="ir.ui.view">
+        <field name="name">mysdb.store.tree</field>
+        <field name="model">mysdb.store</field>
+        <field name="priority">1</field>
+        <field name="arch" type="xml">
+            <tree string="Stores" editable="bottom">
+                <field name="store_code"/>
+                <field name="store_name_ar"/>
+                <field name="store_name_en"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="view_mysdb_store_form" model="ir.ui.view">
+        <field name="name">mysdb.store.form</field>
+        <field name="model">mysdb.store</field>
+        <field name="priority">1</field>
+        <field name="arch" type="xml">
+            <form string="Store">
+                <sheet>
+                    <group>
+                        <field name="store_code"/>
+                        <field name="store_name_ar"/>
+                        <field name="store_name_en"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- SECTION VIEWS -->
+    <record id="view_mysdb_section_tree" model="ir.ui.view">
+        <field name="name">mysdb.section.tree</field>
+        <field name="model">mysdb.section</field>
+        <field name="priority">1</field>
+        <field name="arch" type="xml">
+            <tree string="Sections" editable="bottom">
+                <field name="section_id_mysdb"/>
+                <field name="section_name_ar"/>
+                <field name="section_name_en"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="view_mysdb_section_form" model="ir.ui.view">
+        <field name="name">mysdb.section.form</field>
+        <field name="model">mysdb.section</field>
+        <field name="priority">1</field>
+        <field name="arch" type="xml">
+            <form string="Section">
+                <sheet>
+                    <group>
+                        <field name="section_id_mysdb"/>
+                        <field name="section_name_ar"/>
+                        <field name="section_name_en"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- PROJECT VIEWS -->
+    <record id="view_mysdb_project_tree" model="ir.ui.view">
+        <field name="name">mysdb.project.tree</field>
+        <field name="model">mysdb.project</field>
+        <field name="priority">1</field>
+        <field name="arch" type="xml">
+            <tree string="Projects" editable="bottom">
+                <field name="project_id_mysdb"/>
+                <field name="project_name_ar"/>
+                <field name="project_name_en"/>
+                <field name="section_id" options="{'no_create': True, 'no_open': True}"/>
+                <field name="store_id" options="{'no_create': True, 'no_open': True}"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="view_mysdb_project_form" model="ir.ui.view">
+        <field name="name">mysdb.project.form</field>
+        <field name="model">mysdb.project</field>
+        <field name="priority">1</field>
+        <field name="arch" type="xml">
+            <form string="Project">
+                <sheet>
+                    <div class="oe_title">
+                        <label for="project_name_en" class="oe_edit_only" string="Project English Name"/>
+                        <h1>
+                            <field name="project_name_en" placeholder="ENTER PROJECT NAME HERE"/>
+                        </h1>
+                    </div>
+                    <group>
+                        <group string="Mandatory Details">
+                            <field name="project_id_mysdb"/>
+                            <field name="project_name_ar"/>
+                            <field name="section_id" string="SECTION (ARABIC)" options="{'no_create': True, 'no_open': True}"/>
+                            <field name="store_id" options="{'no_create': True, 'no_open': True}"/>
+                        </group>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- MARKETING CHANNEL VIEWS -->
+    <record id="view_mysdb_marketing_channel_tree" model="ir.ui.view">
+        <field name="name">mysdb.marketing.channel.tree</field>
+        <field name="model">mysdb.marketing_channel</field>
+        <field name="priority">1</field>
+        <field name="arch" type="xml">
+            <tree string="Marketing Channels" editable="bottom">
+                <field name="channel_id_mysdb"/>
+                <field name="channel_type"/>
+                <field name="name_ar"/>
+                <field name="name_en"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="view_mysdb_marketing_channel_form" model="ir.ui.view">
+        <field name="name">mysdb.marketing_channel.form</field>
+        <field name="model">mysdb.marketing_channel</field>
+        <field name="priority">1</field>
+        <field name="arch" type="xml">
+            <form string="Marketing Channel">
+                <sheet>
+                    <group>
+                        <field name="channel_id_mysdb"/>
+                        <field name="channel_type"/>
+                        <field name="name_ar"/>
+                        <field name="name_en"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- MARKETING ACCOUNT VIEWS -->
+    <record id="view_mysdb_marketing_account_tree" model="ir.ui.view">
+        <field name="name">mysdb.marketing_account.tree</field>
+        <field name="model">mysdb.marketing_account</field>
+        <field name="priority">1</field>
+        <field name="arch" type="xml">
+            <tree string="Marketing Accounts" editable="bottom">
+                <field name="account_id_mysdb"/>
+                <field name="channel_id" options="{'no_create': True, 'no_open': True}"/>
+                <field name="name_ar"/>
+                <field name="name_en"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="view_mysdb_marketing_account_form" model="ir.ui.view">
+        <field name="name">mysdb.marketing_account.form</field>
+        <field name="model">mysdb.marketing_account</field>
+        <field name="priority">1</field>
+        <field name="arch" type="xml">
+            <form string="Marketing Account">
+                <sheet>
+                    <group>
+                        <field name="account_id_mysdb"/>
+                        <field name="channel_id" options="{'no_create': True, 'no_open': True}"/>
+                        <field name="name_ar"/>
+                        <field name="name_en"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- PRODUCT RELATION VIEWS -->
+    <record id="view_mysdb_product_relation_tree" model="ir.ui.view">
+        <field name="name">mysdb.product.relation.tree</field>
+        <field name="model">mysdb.product_relation</field>
+        <field name="priority">1</field>
+        <field name="arch" type="xml">
+            <tree string="Product Relations" editable="bottom">
+                <field name="product_id" options="{'no_create': True, 'no_open': True}"/>
+                <field name="project_id" options="{'no_create': True, 'no_open': True}"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="view_mysdb_product_relation_form" model="ir.ui.view">
+        <field name="name">mysdb.product.relation.form</field>
+        <field name="model">mysdb.product_relation</field>
+        <field name="priority">1</field>
+        <field name="arch" type="xml">
+            <form string="Product Relation">
+                <sheet>
+                    <group>
+                        <field name="product_id" context="{'filter_used_products': True}" options="{'no_create': True, 'no_open': True}"/>
+                        <field name="project_id" options="{'no_create': True, 'no_open': True}"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_mysdb_product_relation_search" model="ir.ui.view">
+        <field name="name">mysdb.product.relation.search</field>
+        <field name="model">mysdb.product_relation</field>
+        <field name="arch" type="xml">
+            <search string="Product Relation Search">
+                <field name="product_id"/>
+                <field name="project_id"/>
+                <group expand="0" string="Group By">
+                    <filter string="Project" name="group_by_project" context="{'group_by': 'project_id'}"/>
+                    <filter string="Product" name="group_by_product" context="{'group_by': 'product_id'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <!-- PRODUCT MARKETING RELATION VIEWS -->
+    <record id="view_mysdb_product_marketing_relation_tree" model="ir.ui.view">
+        <field name="name">mysdb.product.marketing.relation.tree</field>
+        <field name="model">mysdb.product_marketing_relation</field>
+        <field name="priority">1</field>
+        <field name="arch" type="xml">
+            <tree string="Product Marketing Relations" editable="bottom">
+                <field name="product_id" options="{'no_create': True, 'no_open': True}"/>
+                <field name="account_id" options="{'no_create': True, 'no_open': True}"/>
+            </tree>
+        </field>
+    </record>
+
+    <!-- PERIOD TARGET COST VIEWS -->
+    <record id="view_mysdb_period_target_cost_tree" model="ir.ui.view">
+        <field name="name">mysdb.period_target_cost.tree</field>
+        <field name="model">mysdb.period_target_cost</field>
+        <field name="priority">1</field>
+        <field name="arch" type="xml">
+            <tree string="Period Target Cost" editable="bottom" decoration-success="achievement_percent >= 100" decoration-danger="achievement_percent &lt; 50">
+                <field name="period" widget="selection"/>
+                <field name="target_object"/>
+                <field name="object_id" optional="hide"/>
+                <field name="target" sum="Total Target"/>
+                <field name="cost" sum="Total Cost"/>
+                <field name="actual_income" sum="Total Actual"/>
+                <field name="achievement_percent" widget="percentage_pie" string="%" readonly="1"/>
+                <field name="variance" sum="Total Variance" decoration-danger="variance &lt; 0" decoration-success="variance >= 0"/>
+            </tree>
+        </field>
+    </record>
+
+    <!-- Define action before form view to avoid forward reference -->
+    <record id="action_mysdb_order_report_final" model="ir.actions.act_window">
+        <field name="name">Orders Analysis (Joined)</field>
+        <field name="res_model">mysdb.order.report</field>
+        <field name="view_mode">tree,pivot,graph</field>
+    </record>
+
+    <record id="view_mysdb_period_target_cost_form" model="ir.ui.view">
+        <field name="name">mysdb.period_target_cost.form</field>
+        <field name="model">mysdb.period_target_cost</field>
+        <field name="priority">1</field>
+        <field name="arch" type="xml">
+            <form string="Period Target Cost">
+                <sheet>
+                    <div class="oe_button_box" name="button_box">
+                        <button name="%(action_mysdb_order_report_final)d" type="action" class="oe_stat_button" icon="fa-line-chart" string="View Orders Analysis"/>
+                    </div>
+                    <group>
+                        <group string="Target Definition">
+                            <field name="period" widget="selection"/>
+                            <field name="target_object"/>
+                            <field name="object_id"/>
+                        </group>
+                        <group string="Financials">
+                            <field name="target"/>
+                            <field name="cost"/>
+                        </group>
+                    </group>
+                    <group string="Achievement Tracking">
+                        <group>
+                            <field name="actual_income" widget="monetary"/>
+                            <field name="achievement_percent" widget="progressbar"/>
+                        </group>
+                        <group>
+                            <field name="variance" widget="monetary" decoration-danger="variance &lt; 0" decoration-success="variance >= 0"/>
+                        </group>
+                    </group>
+                    <group string="Import Data" invisible="1">
+                        <field name="import_type"/>
+                        <field name="import_id"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <!-- JOINED REPORT VIEW -->
+    <record id="view_mysdb_order_report_tree_final" model="ir.ui.view">
+        <field name="name">mysdb.order.report.tree.final</field>
+        <field name="model">mysdb.order.report</field>
+        <field name="priority">1</field>
+        <field name="arch" type="xml">
+            <tree string="Order Analysis" create="false" delete="false">
+                <field name="order_code"/>
+                <field name="order_created_at"/>
+                <field name="customer_name"/>
+                <field name="section_name_ar"/>
+                <field name="project_name_ar"/>
+                <field name="marketing_account_name_ar"/>
+                <field name="product_name"/>
+                <field name="line_total" sum="Total Lines"/>
+                <field name="payment_status" widget="badge" decoration-success="payment_status == 'paid'"/>
+                <field name="transaction_reference" optional="hide"/>
+                <field name="payment_method_name" optional="hide"/>
+                <field name="store_name"/>
+                <field name="invoice_link" widget="url" optional="hide"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="view_mysdb_order_report_pivot" model="ir.ui.view">
+        <field name="name">mysdb.order.report.pivot</field>
+        <field name="model">mysdb.order.report</field>
+        <field name="arch" type="xml">
+            <pivot string="Orders Analysis" sample="1">
+                <field name="section_name_ar" type="row"/>
+                <field name="project_name_ar" type="row"/>
+                <field name="marketing_account_name_ar" type="row"/>
+                <field name="product_name" type="row"/>
+                <field name="line_total" type="measure"/>
+            </pivot>
+        </field>
+    </record>
+
+    <!-- DATA AUDIT VIEW -->
+    <record id="view_mysdb_data_audit_tree" model="ir.ui.view">
+        <field name="name">mysdb.data.audit.tree</field>
+        <field name="model">mysdb.data.audit</field>
+        <field name="priority">1</field>
+        <field name="arch" type="xml">
+            <tree string="Data Maintenance Audit" create="false" delete="false" decoration-danger="issue_type == 'missing_product'" decoration-warning="issue_type in ('no_project', 'no_marketing')">
+                <field name="issue_type" widget="badge" decoration-danger="issue_type == 'missing_product'" decoration-warning="issue_type in ('no_project', 'no_marketing')"/>
+                <field name="product_sku"/>
+                <field name="product_name"/>
+                <field name="store_id"/>
+                <field name="last_seen_order"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="view_mysdb_data_audit_search" model="ir.ui.view">
+        <field name="name">mysdb.data.audit.search</field>
+        <field name="model">mysdb.data.audit</field>
+        <field name="arch" type="xml">
+            <search string="Audit Search">
+                <field name="product_name"/>
+                <field name="product_sku"/>
+                <filter string="Missing in Catalog" name="missing" domain="[('issue_type','=','missing_product')]"/>
+                <filter string="No Project" name="no_project" domain="[('issue_type','=','no_project')]"/>
+                <filter string="No Marketing Account" name="no_marketing" domain="[('issue_type','=','no_marketing')]"/>
+                <group expand="0" string="Group By">
+                    <filter string="Issue Category" name="group_issue" context="{'group_by':'issue_type'}"/>
+                    <filter string="Store" name="group_store" context="{'group_by':'store_id'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <!-- ACTIONS -->
+    <record id="action_mysdb_data_audit" model="ir.actions.act_window">
+        <field name="name">Data Maintenance Audit</field>
+        <field name="res_model">mysdb.data.audit</field>
+        <field name="view_mode">tree</field>
+        <field name="search_view_id" ref="view_mysdb_data_audit_search"/>
+    </record>
+
+    <record id="action_mysdb_orders" model="ir.actions.act_window">
+        <field name="name">Orders</field>
+        <field name="res_model">mysdb.order</field>
+        <field name="view_mode">tree,form,pivot</field>
+    </record>
+
+    <record id="action_mysdb_order_details" model="ir.actions.act_window">
+        <field name="name">Order Details</field>
+        <field name="res_model">mysdb.order.detail</field>
+        <field name="view_mode">tree,form,pivot</field>
+    </record>
+
+    <record id="action_mysdb_products" model="ir.actions.act_window">
+        <field name="name">Products</field>
+        <field name="res_model" >mysdb.product</field>
+        <field name="view_mode">tree,form</field>
+    </record>
+
+    <record id="action_mysdb_pos" model="ir.actions.act_window">
+        <field name="name">POS Data</field>
+        <field name="res_model">mysdb.pos</field>
+        <field name="view_mode">tree,form</field>
+    </record>
+
+    <record id="action_mysdb_stores" model="ir.actions.act_window">
+        <field name="name">Stores</field>
+        <field name="res_model">mysdb.store</field>
+        <field name="view_mode">tree,form</field>
+    </record>
+
+    <record id="action_mysdb_sections" model="ir.actions.act_window">
+        <field name="name">Sections</field>
+        <field name="res_model">mysdb.section</field>
+        <field name="view_mode">tree,form</field>
+    </record>
+
+    <record id="action_mysdb_projects" model="ir.actions.act_window">
+        <field name="name">Projects</field>
+        <field name="res_model">mysdb.project</field>
+        <field name="view_mode">tree,form</field>
+    </record>
+
+    <record id="action_mysdb_marketing_channels" model="ir.actions.act_window">
+        <field name="name">Marketing Channels</field>
+        <field name="res_model">mysdb.marketing_channel</field>
+        <field name="view_mode">tree,form</field>
+    </record>
+
+    <record id="action_mysdb_marketing_accounts" model="ir.actions.act_window">
+        <field name="name">Marketing Accounts</field>
+        <field name="res_model">mysdb.marketing_account</field>
+        <field name="view_mode">tree,form</field>
+    </record>
+
+    <record id="action_mysdb_product_relation" model="ir.actions.act_window">
+        <field name="name">Product Relations</field>
+        <field name="res_model">mysdb.product_relation</field>
+        <field name="view_mode">tree,form</field>
+    </record>
+
+    <record id="action_mysdb_product_marketing_relation" model="ir.actions.act_window">
+        <field name="name">Product Marketing Relations</field>
+        <field name="res_model">mysdb.product_marketing_relation</field>
+        <field name="view_mode">tree,form</field>
+    </record>
+
+    <record id="action_mysdb_period_target_costs" model="ir.actions.act_window">
+        <field name="name">Period Target Costs</field>
+        <field name="res_model">mysdb.period_target_cost</field>
+        <field name="view_mode">tree,form,pivot</field>
+    </record>
+</odoo>
