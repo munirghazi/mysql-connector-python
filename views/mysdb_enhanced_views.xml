@@ -462,18 +462,22 @@
                 <group>
                     <group string="Step 1: Select Target">
                         <field name="target_type" widget="radio"/>
-                        <field name="project_id" attrs="{'invisible': [('target_type', '!=', 'project')], 'required': [('target_type', '=', 'project')]}"/>
-                        <field name="marketing_account_id" attrs="{'invisible': [('target_type', '!=', 'marketing')], 'required': [('target_type', '=', 'marketing')]}"/>
+                        <field name="project_id" 
+                               invisible="target_type != 'project'" 
+                               required="target_type == 'project'"/>
+                        <field name="marketing_account_id" 
+                               invisible="target_type != 'marketing'" 
+                               required="target_type == 'marketing'"/>
                     </group>
                     <group string="Step 2: Select Periods">
                         <field name="year"/>
                         <field name="create_yearly"/>
                         <field name="create_monthly"/>
-                        <field name="select_specific_months" attrs="{'invisible': [('create_monthly', '=', False)]}"/>
+                        <field name="select_specific_months" invisible="not create_monthly"/>
                     </group>
                 </group>
                 
-                <group string="Select Specific Months" attrs="{'invisible': ['|', ('create_monthly', '=', False), ('select_specific_months', '=', False)]}">
+                <group string="Select Specific Months" invisible="not create_monthly or not select_specific_months">
                     <group>
                         <field name="month_01" string="January"/>
                         <field name="month_02" string="February"/>
@@ -500,11 +504,12 @@
                     <group string="Cost Calculation">
                         <field name="cost_calculation_type" widget="radio"/>
                         <field name="cost_percentage" 
-                               attrs="{'invisible': [('cost_calculation_type', '!=', 'percentage')], 'required': [('cost_calculation_type', '=', 'percentage')]}"
+                               invisible="cost_calculation_type != 'percentage'" 
+                               required="cost_calculation_type == 'percentage'"
                                widget="percentage"/>
                         <field name="cost_amount" 
                                widget="monetary"
-                               attrs="{'readonly': [('cost_calculation_type', '=', 'percentage')]}"/>
+                               readonly="cost_calculation_type == 'percentage'"/>
                     </group>
                 </group>
                 
