@@ -27,19 +27,19 @@ try:
 except ImportError:
     Fernet = None
 
-class MysqlCredential(models.Model):
-    """Model holding Mysql credentials"""
-    _name = 'mysql.credential'
-    _description = 'Mysql Credential'
+class MysdbCredential(models.Model):
+    """Model holding MySDB credentials"""
+    _name = 'mysdb.credential'
+    _description = 'MySDB Credential'
 
     name = fields.Char(string='Database', help='Name of the database',
                        required=True)
     user = fields.Char(string='Username', help='Username of connection',
                        required=True)
-    host = fields.Char(string='Host', help='Host name of MySQL connection',
+    host = fields.Char(string='Host', help='Host name of MySDB connection',
                        required=True)
     password = fields.Char(string='Password',
-                           help='Password of My SQL connection', required=True,
+                           help='Password of My SDB connection', required=True,
                            groups='base.group_system')
     state = fields.Selection([('draft', 'Draft'),
                               ('connect', 'Connected')],
@@ -48,11 +48,11 @@ class MysqlCredential(models.Model):
 
     def _get_encrypt_key(self):
         ICPSudo = self.env['ir.config_parameter'].sudo()
-        key = ICPSudo.get_param('odoo_mysql_connector.encrypt_key')
+        key = ICPSudo.get_param('mysdb_connector.encrypt_key')
         if not key:
             if Fernet:
                 key = Fernet.generate_key().decode('utf-8')
-                ICPSudo.set_param('odoo_mysql_connector.encrypt_key', key)
+                ICPSudo.set_param('mysdb_connector.encrypt_key', key)
             else:
                 return None
         return key.encode('utf-8')
@@ -62,12 +62,12 @@ class MysqlCredential(models.Model):
         for vals in vals_list:
             if 'password' in vals:
                 vals['password'] = self._encrypt_password(vals['password'])
-        return super(MysqlCredential, self).create(vals_list)
+        return super(MysdbCredential, self).create(vals_list)
 
     def write(self, vals):
         if 'password' in vals:
             vals['password'] = self._encrypt_password(vals['password'])
-        return super(MysqlCredential, self).write(vals)
+        return super(MysdbCredential, self).write(vals)
 
     def _encrypt_password(self, password):
         if not password or not Fernet:
@@ -92,7 +92,7 @@ class MysqlCredential(models.Model):
             return self.password
 
     def action_connect(self):
-        """Method for connecting with Mysql"""
+        """Method for connecting with MySDB"""
         try:
             connection = mysql.connector.connect(
                 host=self.host,
@@ -107,4 +107,4 @@ class MysqlCredential(models.Model):
                 connection.close()
         except mysql.connector.Error as e:
             # Handle any connection errors
-            raise ValidationError(f"Error connecting to MySQL: {e}")
+            raise ValidationError(f"Error connecting to MySDB: {e}")

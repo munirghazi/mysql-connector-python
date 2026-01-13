@@ -26,22 +26,24 @@ import logging
 import csv
 import io
 import base64
+from datetime import datetime
+import dateutil.parser
 
 _logger = logging.getLogger(__name__)
 
-class MysqlConnector(models.Model):
-    """Model for connecting with Mysql"""
-    _name = 'mysql.connector'
-    _description = 'Mysql Connector'
+class MysdbConnector(models.Model):
+    """Model for connecting with MySDB"""
+    _name = 'mysdb.connector'
+    _description = 'MySDB Connector'
 
     name = fields.Char(string='Name', help='Name of the record',
                        required=True)
-    credential_id = fields.Many2one('mysql.credential',
+    credential_id = fields.Many2one('mysdb.credential',
                                     string='Connection', domain="[('state', '=', 'connect')]",
-                                    help='Choose the My Sql connection',
+                                    help='Choose the MySDB connection',
                                     required=True)
-    sql_table = fields.Char(string='Mysql Table Name',
-                            help='Name of the table in Mysql database',
+    sql_table = fields.Char(string='MySDB Table Name',
+                            help='Name of the table in MySDB database',
                             required=True)
     model_id = fields.Many2one('ir.model', string='Odoo Table Name',
                                help='Database table in Odoo to which you have'
@@ -54,8 +56,14 @@ class MysqlConnector(models.Model):
                                'connection_id',
                                string='Field Mapping',
                                help='Select the fields to be mapped')
+    filter_query = fields.Char(string='SQL Filter',
+                              help='Add a WHERE clause without the "WHERE" keyword. Example: status="active" AND year=2025')
+    delete_odoo_records = fields.Boolean(string='Delete Odoo Records on Reset',
+                                        help='If checked, resetting will also delete the actual records in Odoo (Orders, Products, etc.)')
+    auto_sync = fields.Boolean(string='Auto Sync', default=False,
+                              help='If enabled, this connector will be synced automatically by the system scheduler.')
     is_fetched = fields.Boolean(string='Is Fetched',
-                                help='True if once data fetched from mysql')
+                                help='True if once data fetched from mysdb')
     state = fields.Selection([
         ('draft', 'Draft'),
         ('fetched', 'Fetched'),
@@ -63,6 +71,20 @@ class MysqlConnector(models.Model):
     ], string='Status', readonly=True, copy=False, default='draft', help="State of the record")
     last_sync_date = fields.Datetime(string='Last Sync Date', readonly=True)
     last_sync_message = fields.Text(string='Last Sync Message', readonly=True)
+
+    def _parse_mysql_date(self, date_str):
+        if not date_str or not isinstance(date_str, str):
+            return date_str
+        
+        # Handle Arabic AM/PM formats like "28-05-2025 | 11:58 م"
+        clean_date = date_str.replace('م', 'PM').replace('ص', 'AM').replace('|', '').strip()
+        
+        try:
+            # Try parsing with dayfirst=True for DD-MM-YYYY formats
+            dt = dateutil.parser.parse(clean_date, dayfirst=True)
+            return fields.Datetime.to_string(dt)
+        except Exception:
+            return date_str
 
     @api.onchange('model_id', 'sql_table')
     def _onchange_model_id(self):
@@ -86,7 +108,7 @@ class MysqlConnector(models.Model):
         cursor = connection.cursor(dictionary=True)
         
         try:
-            cursor.execute(f"SHOW COLUMNS FROM {self.sql_table};")
+            cursor.execute(f"SHOW COLUMNS FROM `{self.sql_table}`;")
             field_list = cursor.fetchall()
             unique = next((rec['Field'] for rec in field_list if rec.get('Key', '').upper() == 'PRI'),
                           next((rec['Field'] for rec in field_list if rec.get('Key', '').upper() == 'UNI'), None))
@@ -97,7 +119,8 @@ class MysqlConnector(models.Model):
             model_obj = self.env[self.model_id.model]
             
             # 2. Get Total Count for progress tracking
-            cursor.execute(f"SELECT COUNT(*) as total FROM {self.sql_table};")
+            where_clause = f" WHERE {self.filter_query}" if self.filter_query else ""
+            cursor.execute(f"SELECT COUNT(*) as total FROM `{self.sql_table}`{where_clause};")
             total_records = cursor.fetchone()['total']
             _logger.info(f"Starting sync for {self.sql_table}: {total_records} records found.")
 
@@ -106,7 +129,7 @@ class MysqlConnector(models.Model):
 
             while offset < total_records:
                 # 3. Fetch MySQL Batch
-                cursor.execute(f"SELECT * FROM {self.sql_table} LIMIT {batch_size} OFFSET {offset};")
+                cursor.execute(f"SELECT * FROM `{self.sql_table}`{where_clause} LIMIT {batch_size} OFFSET {offset};")
                 records = cursor.fetchall()
                 if not records:
                     break
@@ -115,10 +138,10 @@ class MysqlConnector(models.Model):
                 batch_mysql_refs = [str(item[unique]) for item in records]
                 existing_imported = self.env['imported.data'].sudo().search_read([
                     ('model_id', '=', self.model_id.id),
-                    ('mysql_table', '=', self.sql_table),
-                    ('mysql_ref', 'in', batch_mysql_refs)
-                ], ['mysql_ref', 'odoo_ref'])
-                synced_map = {rec['mysql_ref']: rec['odoo_ref'] for rec in existing_imported}
+                    ('mysdb_table', '=', self.sql_table),
+                    ('mysdb_ref', 'in', batch_mysql_refs)
+                ], ['mysdb_ref', 'odoo_ref'])
+                synced_map = {rec['mysdb_ref']: rec['odoo_ref'] for rec in existing_imported}
 
                 # 5. Pre-fetch Foreign Key mappings for THIS BATCH ONLY
                 fk_mappings = {}
@@ -126,13 +149,13 @@ class MysqlConnector(models.Model):
                     fk_vals = list(set(str(item[sync_rec.mysql_field]) for item in records if item.get(sync_rec.mysql_field)))
                     if fk_vals:
                         found_fks = self.env['imported.data'].sudo().search_read([
-                            ('mysql_table', '=', sync_rec.ref_table),
-                            ('mysql_ref', 'in', fk_vals)
-                        ], ['mysql_ref', 'odoo_ref'])
+                            ('mysdb_table', '=', sync_rec.ref_table),
+                            ('mysdb_ref', 'in', fk_vals)
+                        ], ['mysdb_ref', 'odoo_ref'])
                         if sync_rec.ref_table not in fk_mappings:
                             fk_mappings[sync_rec.ref_table] = {}
                         for f in found_fks:
-                            fk_mappings[sync_rec.ref_table][f['mysql_ref']] = f['odoo_ref']
+                            fk_mappings[sync_rec.ref_table][f['mysdb_ref']] = f['odoo_ref']
 
                 # 6. Process Batch
                 records_to_create = []
@@ -149,8 +172,11 @@ class MysqlConnector(models.Model):
                         if mysql_val is None: continue
 
                         if not rec.foreign_key:
+                            # Parse dates if Odoo field is Datetime/Date
+                            if rec.ir_field_id.ttype in ['datetime', 'date']:
+                                vals[rec.ir_field_id.name] = self._parse_mysql_date(mysql_val)
                             # Clean IDs and Codes
-                            if isinstance(mysql_val, str) and rec.ir_field_id.name in ['order_id', 'order_linked_id', 'order_code']:
+                            elif isinstance(mysql_val, str) and rec.ir_field_id.name in ['order_id', 'order_linked_id', 'order_code']:
                                 vals[rec.ir_field_id.name] = mysql_val.strip()
                             else:
                                 vals[rec.ir_field_id.name] = mysql_val
@@ -175,8 +201,8 @@ class MysqlConnector(models.Model):
                     new_recs = model_obj.create(records_to_create)
                     log_vals = [{
                         'model_id': self.model_id.id,
-                        'mysql_ref': import_log_refs[j],
-                        'mysql_table': self.sql_table,
+                        'mysdb_ref': import_log_refs[j],
+                        'mysdb_table': self.sql_table,
                         'odoo_ref': new_recs[j].id,
                         'log_note': 'Success'
                     } for j in range(len(new_recs))]
@@ -275,13 +301,54 @@ class MysqlConnector(models.Model):
 
         self.write({'state': 'sync'})
 
+    def action_reset_connector(self):
+        """Method to reset the sync logs and optionally the Odoo records"""
+        self.ensure_one()
+        
+        # 1. Delete Sync Logs
+        logs = self.env['imported.data'].sudo().search([
+            ('model_id', '=', self.model_id.id),
+            ('mysdb_table', '=', self.sql_table)
+        ])
+        
+        # 2. Optionally Delete Odoo Records
+        if self.delete_odoo_records:
+            odoo_ids = logs.mapped('odoo_ref')
+            if odoo_ids:
+                model_obj = self.env[self.model_id.model].sudo()
+                records = model_obj.browse(odoo_ids).exists()
+                if records:
+                    records.unlink()
+        
+        # 3. Delete Logs after records (to maintain FKs if any)
+        logs.unlink()
+        
+        # 4. Reset State
+        self.write({
+            'state': 'fetched',
+            'last_sync_date': False,
+            'last_sync_message': f"Connector reset successful. Logs cleared. Odoo records deleted: {self.delete_odoo_records}"
+        })
+        return True
+
+    @api.model
+    def cron_auto_sync_all(self):
+        """Method called by scheduled action to sync all connectors with auto_sync=True"""
+        connectors = self.search([('auto_sync', '=', True), ('state', 'in', ['fetched', 'sync'])])
+        for conn in connectors:
+            try:
+                conn.action_sync_table()
+                _logger.info(f"Auto-sync completed for connector: {conn.name}")
+            except Exception as e:
+                _logger.error(f"Auto-sync failed for connector {conn.name}: {str(e)}")
+
     def action_fetch_data(self):
-        """Method for fetching the columns of Mysql table while preserving existing mappings"""
-        records = self.mysql_connect(f"SHOW COLUMNS FROM {self.sql_table};")
+        """Method for fetching the columns of MySDB table while preserving existing mappings"""
+        records = self.mysql_connect(f"SHOW COLUMNS FROM `{self.sql_table}`;")
         if not any(key in rec.get('Key', '') for rec in records for
                    key in ['PRI', 'UNI']):
             raise ValidationError(
-                "The MySQL table cannot be imported because it "
+                "The MySDB table cannot be imported because it "
                 "doesn't have a Unique or Primary key.")
         
         existing_fields = self.sync_ids.mapped('mysql_field')
@@ -326,7 +393,7 @@ class MysqlConnector(models.Model):
             })
 
     def mysql_connect(self, query):
-        """Method for connecting with Mysql"""
+        """Method for connecting with MySDB"""
         try:
             connection = mysql.connector.connect(
                 host=self.credential_id.host,
@@ -335,7 +402,7 @@ class MysqlConnector(models.Model):
                 database=self.credential_id.name
             )
             if not connection.is_connected():
-                raise ValidationError(f"Error connecting to MySQL")
+                raise ValidationError(f"Error connecting to MySDB")
             cursor = connection.cursor(dictionary=True)
             cursor.execute(query)
             results = cursor.fetchall()
@@ -344,4 +411,4 @@ class MysqlConnector(models.Model):
             connection.close()
             return results
         except mysql.connector.Error as e:
-            raise ValidationError(f"Error connecting to MySQL: {e}")
+            raise ValidationError(f"Error connecting to MySDB: {e}")

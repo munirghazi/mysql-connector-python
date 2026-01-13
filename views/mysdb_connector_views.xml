@@ -1,8 +1,8 @@
-<?xml version="1.0" encoding="UTF-8" ?>
+﻿<?xml version="1.0" encoding="UTF-8" ?>
 <odoo>
-    <!--    mysql connector form view-->
-    <record id="mysql_connector_view_form" model="ir.ui.view">
-        <field name="model">mysql.connector</field>
+    <!--    mysdb connector form view-->
+    <record id="mysdb_connector_view_form" model="ir.ui.view">
+        <field name="model">mysdb.connector</field>
         <field name="arch" type="xml">
             <form>
                 <header>
@@ -14,25 +14,37 @@
                             class="btn-primary" invisible="state == 'draft'"/>
                     <button name="action_clean_data" type="object" string="Clean Existing Data"
                             class="btn-secondary" invisible="state == 'draft'"/>
+                    <button name="action_reset_connector" type="object" string="Reset Connector"
+                            class="btn-danger" invisible="state == 'draft'" confirm="Are you sure you want to clear the sync logs for this table?"/>
                     <field name="state" widget="statusbar" statusbar_visible="draft,fetched,sync"/>
                 </header>
                 <sheet>
                     <group>
-                        <group>
+                        <group string="Connection Details">
                             <field name="name"/>
                             <field name="credential_id" options="{'no_create': True}"/>
                         </group>
-                        <group>
+                        <group string="Target Mapping">
                             <field name="sql_table"/>
                             <field name="model_id" options="{'no_create': True}"/>
+                            <field name="auto_sync" widget="boolean_toggle"/>
                             <field name="is_fetched" invisible="True"/>
                         </group>
+                    </group>
+                    <group string="Import Filtering">
+                        <field name="filter_query" string="SQL WHERE Filter" placeholder="e.g. status='paid' AND created_at > '2025-01-01'"/>
+                        <field name="delete_odoo_records" widget="boolean_toggle"/>
+                        <p class="text-muted">
+                            Enter the SQL condition to filter records from the source table. 
+                            Do NOT include the word 'WHERE'. 
+                            Example: <code>status='active'</code>
+                        </p>
                     </group>
                     <notebook invisible="is_fetched == False" >
                         <page string="Data Mapping">
                             <field name="sync_ids">
                                 <tree create="false" editable="bottom">
-                                    <field name="mysql_field" readonly="1"/>
+                                    <field name="mysql_field" readonly="1" string="MySDB Field"/>
                                     <field name="ir_field_id" options="{'no_create': True}"  />
                                     <field name="ref_table" readonly="1"/>
                                     <field name="ref_col" readonly="1"/>
@@ -53,9 +65,9 @@
             </form>
         </field>
     </record>
-    <!--    mysql connector tree view-->
-    <record id="mysql_connector_view_tree" model="ir.ui.view">
-        <field name="model">mysql.connector</field>
+    <!--    mysdb connector tree view-->
+    <record id="mysdb_connector_view_tree" model="ir.ui.view">
+        <field name="model">mysdb.connector</field>
         <field name="arch" type="xml">
             <tree>
                 <field name="name"/>
@@ -65,16 +77,11 @@
             </tree>
         </field>
     </record>
-    <!--    mysql connector action-->
-    <record id="mysql_connector_action" model="ir.actions.act_window">
+    <!--    mysdb connector action-->
+    <record id="mysdb_connector_action" model="ir.actions.act_window">
         <field name="name">Connector</field>
-        <field name="res_model">mysql.connector</field>
+        <field name="res_model">mysdb.connector</field>
         <field name="view_mode">tree,form</field>
     </record>
-    <!--    mysql connector menu-->
-    <menuitem id="mysql_connector_menu"
-              name="Connector"
-              action="mysql_connector_action"
-              parent="mysql_connector_menu_configuration"
-              sequence="1"/>
+    <!--    mysdb connector menu - Moved to mysdb_menus.xml to avoid forward reference -->
 </odoo>
