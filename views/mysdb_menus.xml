@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<odoo>
+    <!-- Root Menu -->
+    <menuitem id="menu_mysdb_dashboard_root" 
+              name="MySDB Dashboard" 
+              sequence="10" 
+              web_icon="odoo_mysql_connector,static/description/icon.png"
+              groups="base.group_user"/>
+
+    <!-- Menu Subgroups -->
+    <menuitem id="menu_mysdb_data_group" name="Data Management" parent="menu_mysdb_dashboard_root" sequence="10"/>
+    <menuitem id="menu_mysdb_org_group" name="Sections &amp; Projects" parent="menu_mysdb_dashboard_root" sequence="20"/>
+    <menuitem id="menu_mysdb_marketing_group" name="Marketing" parent="menu_mysdb_dashboard_root" sequence="30"/>
+    <menuitem id="menu_mysdb_relations_group" name="Relations &amp; Targets" parent="menu_mysdb_dashboard_root" sequence="40"/>
+    <menuitem id="menu_mysdb_reporting_group" name="Reporting" parent="menu_mysdb_dashboard_root" sequence="50"/>
+    <menuitem id="menu_mysdb_tools_group" name="Tools" parent="menu_mysdb_dashboard_root" sequence="60"/>
+    <menuitem id="mysdb_connector_menu_configuration" name="Configuration" parent="menu_mysdb_dashboard_root" sequence="100"/>
+
+    <!-- Data Management Menus -->
+    <menuitem id="menu_mysdb_orders" name="Orders" parent="menu_mysdb_data_group" action="action_mysdb_orders" sequence="10"/>
+    <menuitem id="menu_mysdb_order_details" name="Order Details" parent="menu_mysdb_data_group" action="action_mysdb_order_details" sequence="15"/>
+    <menuitem id="menu_mysdb_products" name="Products" parent="menu_mysdb_data_group" action="action_mysdb_products" sequence="20"/>
+    <menuitem id="menu_mysdb_stores" name="Stores" parent="menu_mysdb_data_group" action="action_mysdb_stores" sequence="25"/>
+    <menuitem id="menu_mysdb_pos" name="POS Data" parent="menu_mysdb_data_group" action="action_mysdb_pos" sequence="30"/>
+    
+    <!-- Sections & Projects -->
+    <menuitem id="menu_mysdb_sections" name="Sections" parent="menu_mysdb_org_group" action="action_mysdb_sections" sequence="10"/>
+    <menuitem id="menu_mysdb_projects" name="Projects" parent="menu_mysdb_org_group" action="action_mysdb_projects" sequence="20"/>
+    
+    <!-- Marketing -->
+    <menuitem id="menu_mysdb_marketing_channels" name="Channels" parent="menu_mysdb_marketing_group" action="action_mysdb_marketing_channels" sequence="10"/>
+    <menuitem id="menu_mysdb_marketing_accounts" name="Accounts" parent="menu_mysdb_marketing_group" action="action_mysdb_marketing_accounts" sequence="20"/>
+    
+    <!-- Relations & Targets -->
+    <menuitem id="menu_mysdb_product_relation" name="Product Relations" parent="menu_mysdb_relations_group" action="action_mysdb_product_relation" sequence="10"/>
+    <menuitem id="menu_mysdb_product_marketing_relation" name="Marketing Relations" parent="menu_mysdb_relations_group" action="action_mysdb_product_marketing_relation" sequence="15"/>
+    <menuitem id="menu_mysdb_period_target_costs" name="Period Target Costs" parent="menu_mysdb_relations_group" action="action_mysdb_period_target_costs" sequence="20"/>
+
+    <!-- Reporting -->
+    <menuitem id="menu_mysdb_order_report" name="Orders Analysis (Joined)" parent="menu_mysdb_reporting_group" action="action_mysdb_order_report_final" sequence="10"/>
+    <menuitem id="menu_mysdb_project_income_report" name="Project Income Analysis" parent="menu_mysdb_reporting_group" action="action_mysdb_project_income_report" sequence="15"/>
+    <menuitem id="menu_mysdb_marketing_income_report" name="Marketing Income Analysis" parent="menu_mysdb_reporting_group" action="action_mysdb_marketing_income_report" sequence="16"/>
+    <menuitem id="menu_mysdb_data_audit" name="Data Maintenance Audit" parent="menu_mysdb_reporting_group" action="action_mysdb_data_audit_enhanced" sequence="20"/>
+    
+    <!-- Tools -->
+    <menuitem id="menu_mysdb_bulk_assign_project" name="Bulk Assign to Project" parent="menu_mysdb_tools_group" action="action_mysdb_bulk_assign_project" sequence="10"/>
+    <menuitem id="menu_mysdb_bulk_assign_marketing" name="Bulk Assign to Marketing" parent="menu_mysdb_tools_group" action="action_mysdb_bulk_assign_marketing" sequence="20"/>
+    <menuitem id="menu_mysdb_bulk_period_creation" name="Bulk Create Periods" parent="menu_mysdb_tools_group" action="action_mysdb_bulk_period_creation" sequence="30"/>
+
+    <!-- Configuration -->
+    <menuitem id="mysdb_connector_menu" name="Connector" action="mysdb_connector_action" parent="mysdb_connector_menu_configuration" groups="base.group_system" sequence="1"/>
+    <menuitem id="mysdb_credential_menu" name="Credentials" action="mysdb_credential_action" parent="mysdb_connector_menu_configuration" groups="base.group_system" sequence="7"/>
+    <menuitem id="menu_imported_data" name="Sync Logs (Imported Data)" action="action_imported_data" parent="mysdb_connector_menu_configuration" sequence="10"/>
+</odoo>
