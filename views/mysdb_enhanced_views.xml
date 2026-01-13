@@ -1,0 +1,540 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- ========================================
+         DATA AUDIT VIEWS (Enhanced)
+         ======================================== -->
+    
+    <record id="view_mysdb_data_audit_tree" model="ir.ui.view">
+        <field name="name">mysdb.data.audit.tree</field>
+        <field name="model">mysdb.data.audit</field>
+        <field name="arch" type="xml">
+            <tree string="Data Maintenance Audit" 
+                  decoration-danger="priority=='high'" 
+                  decoration-warning="priority=='medium'"
+                  decoration-muted="priority=='low'"
+                  export_xlsx="1">
+                <field name="priority" invisible="1"/>
+                <field name="issue_type" string="Issue"/>
+                <field name="product_sku" string="SKU"/>
+                <field name="product_name" string="Product"/>
+                <field name="store_id" string="Store"/>
+                <field name="total_order_value" string="Revenue" sum="Total Revenue" 
+                       widget="monetary" options="{'currency_field': 'currency_id'}"/>
+                <field name="order_count" string="Orders" sum="Total Orders"/>
+                <field name="last_seen_order" string="Last Order"/>
+                <field name="priority" string="Priority"/>
+                <field name="product_id_int" string="Product ID" optional="hide"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="view_mysdb_data_audit_search" model="ir.ui.view">
+        <field name="name">mysdb.data.audit.search</field>
+        <field name="model">mysdb.data.audit</field>
+        <field name="arch" type="xml">
+            <search string="Data Audit">
+                <field name="product_sku"/>
+                <field name="product_name"/>
+                <field name="store_id"/>
+                <separator/>
+                <filter string="High Priority" name="filter_high" domain="[('priority', '=', 'high')]"/>
+                <filter string="Medium Priority" name="filter_medium" domain="[('priority', '=', 'medium')]"/>
+                <filter string="Low Priority" name="filter_low" domain="[('priority', '=', 'low')]"/>
+                <separator/>
+                <filter string="Missing from Catalog" name="filter_missing" domain="[('issue_type', '=', 'missing_product')]"/>
+                <filter string="No Project" name="filter_no_project" domain="[('issue_type', '=', 'no_project')]"/>
+                <filter string="No Marketing" name="filter_no_marketing" domain="[('issue_type', '=', 'no_marketing')]"/>
+                <filter string="Incomplete Assignment" name="filter_incomplete" domain="[('issue_type', '=', 'incomplete_assignment')]"/>
+                <separator/>
+                <filter string="Has Revenue" name="filter_revenue" domain="[('total_order_value', '>', 0)]"/>
+                <group expand="0" string="Group By">
+                    <filter string="Issue Type" name="group_issue" context="{'group_by': 'issue_type'}"/>
+                    <filter string="Priority" name="group_priority" context="{'group_by': 'priority'}"/>
+                    <filter string="Store" name="group_store" context="{'group_by': 'store_id'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="view_mysdb_data_audit_graph" model="ir.ui.view">
+        <field name="name">mysdb.data.audit.graph</field>
+        <field name="model">mysdb.data.audit</field>
+        <field name="arch" type="xml">
+            <graph string="Data Audit Analysis" type="bar" stacked="True">
+                <field name="issue_type"/>
+                <field name="priority" type="col"/>
+            </graph>
+        </field>
+    </record>
+
+    <record id="action_mysdb_data_audit_enhanced" model="ir.actions.act_window">
+        <field name="name">Data Maintenance Audit</field>
+        <field name="res_model">mysdb.data.audit</field>
+        <field name="view_mode">tree,graph</field>
+        <field name="context">{'search_default_filter_high': 1, 'search_default_filter_revenue': 1}</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">
+                No data quality issues found!
+            </p>
+            <p>
+                This report shows products that need attention:
+                <ul>
+                    <li>Missing from catalog but in orders</li>
+                    <li>Missing project assignment</li>
+                    <li>Missing marketing assignment</li>
+                    <li>Incomplete assignment (only one of project/marketing)</li>
+                </ul>
+                Issues are prioritized by order recency and revenue impact.
+            </p>
+        </field>
+    </record>
+
+    <!-- ========================================
+         PROJECT INCOME REPORT VIEWS
+         ======================================== -->
+
+    <record id="view_mysdb_project_income_report_tree" model="ir.ui.view">
+        <field name="name">mysdb.project.income.report.tree</field>
+        <field name="model">mysdb.project.income.report</field>
+        <field name="arch" type="xml">
+            <tree string="Project Income Report" 
+                  decoration-success="achievement_percent &gt;= 100" 
+                  decoration-warning="achievement_percent &gt;= 70 and achievement_percent &lt; 100"
+                  decoration-danger="achievement_percent &lt; 70"
+                  export_xlsx="1">
+                <field name="achievement_percent" invisible="1"/>
+                <field name="period" string="Period"/>
+                <field name="period_year" string="Year" optional="show"/>
+                <field name="period_month" string="Month" optional="show"/>
+                <field name="project_id_mysdb" string="Project ID"/>
+                <field name="project_name_ar" string="Project"/>
+                <field name="section_name_ar" string="Section"/>
+                <field name="store_code" string="Store"/>
+                <field name="total_income" string="Income" sum="Total Income" widget="monetary"/>
+                <field name="target_amount" string="Target" sum="Total Target" widget="monetary"/>
+                <field name="achievement_percent" string="Achievement %" widget="percentage" 
+                       decoration-success="achievement_percent &gt;= 100"
+                       decoration-warning="achievement_percent &gt;= 70 and achievement_percent &lt; 100"
+                       decoration-danger="achievement_percent &lt; 70"/>
+                <field name="cost_amount" string="Cost" sum="Total Cost" widget="monetary" optional="hide"/>
+                <field name="profit" string="Profit" sum="Total Profit" widget="monetary"/>
+                <field name="roi" string="ROI %" widget="percentage" optional="show"/>
+                <field name="order_count" string="Orders" sum="Total Orders"/>
+                <field name="product_count" string="Products" optional="hide"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="view_mysdb_project_income_report_search" model="ir.ui.view">
+        <field name="name">mysdb.project.income.report.search</field>
+        <field name="model">mysdb.project.income.report</field>
+        <field name="arch" type="xml">
+            <search string="Project Income">
+                <field name="project_name_ar"/>
+                <field name="project_id_mysdb"/>
+                <field name="section_name_ar"/>
+                <field name="store_code"/>
+                <field name="period"/>
+                <separator/>
+                <filter string="Current Year" name="filter_current_year" 
+                        domain="[('period_year', '=', context_today().strftime('%Y'))]"/>
+                <filter string="Last 3 Months" name="filter_last_3m" 
+                        domain="[('period', '&gt;=', (context_today() - relativedelta(months=3)).strftime('%Y%m'))]"/>
+                <separator/>
+                <filter string="Achieving Target" name="filter_achieving" 
+                        domain="[('achievement_percent', '&gt;=', 100)]"/>
+                <filter string="Below Target" name="filter_below" 
+                        domain="[('achievement_percent', '&lt;', 100)]"/>
+                <filter string="Underperforming (&lt;70%)" name="filter_under" 
+                        domain="[('achievement_percent', '&lt;', 70)]"/>
+                <separator/>
+                <filter string="Profitable" name="filter_profitable" 
+                        domain="[('profit', '&gt;', 0)]"/>
+                <filter string="High ROI (&gt;100%)" name="filter_high_roi" 
+                        domain="[('roi', '&gt;', 100)]"/>
+                <group expand="0" string="Group By">
+                    <filter string="Period" name="group_period" context="{'group_by': 'period'}"/>
+                    <filter string="Year" name="group_year" context="{'group_by': 'period_year'}"/>
+                    <filter string="Project" name="group_project" context="{'group_by': 'project_name_ar'}"/>
+                    <filter string="Section" name="group_section" context="{'group_by': 'section_name_ar'}"/>
+                    <filter string="Store" name="group_store" context="{'group_by': 'store_code'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="view_mysdb_project_income_report_graph" model="ir.ui.view">
+        <field name="name">mysdb.project.income.report.graph</field>
+        <field name="model">mysdb.project.income.report</field>
+        <field name="arch" type="xml">
+            <graph string="Project Income Analysis" type="bar">
+                <field name="period" type="row"/>
+                <field name="project_name_ar" type="col"/>
+                <field name="total_income" type="measure"/>
+                <field name="target_amount" type="measure"/>
+                <field name="profit" type="measure"/>
+            </graph>
+        </field>
+    </record>
+
+    <record id="view_mysdb_project_income_report_pivot" model="ir.ui.view">
+        <field name="name">mysdb.project.income.report.pivot</field>
+        <field name="model">mysdb.project.income.report</field>
+        <field name="arch" type="xml">
+            <pivot string="Project Income Analysis">
+                <field name="period_year" type="row"/>
+                <field name="period_month" type="row"/>
+                <field name="project_name_ar" type="col"/>
+                <field name="total_income" type="measure"/>
+                <field name="profit" type="measure"/>
+                <field name="roi" type="measure"/>
+            </pivot>
+        </field>
+    </record>
+
+    <record id="action_mysdb_project_income_report" model="ir.actions.act_window">
+        <field name="name">Project Income Analysis</field>
+        <field name="res_model">mysdb.project.income.report</field>
+        <field name="view_mode">tree,graph,pivot</field>
+        <field name="context">{'search_default_filter_current_year': 1}</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">
+                No income data yet!
+            </p>
+            <p>
+                This report shows income, targets, and achievement by project and period.
+                Use filters to analyze specific time periods or projects.
+            </p>
+        </field>
+    </record>
+
+    <!-- ========================================
+         MARKETING INCOME REPORT VIEWS
+         ======================================== -->
+
+    <record id="view_mysdb_marketing_income_report_tree" model="ir.ui.view">
+        <field name="name">mysdb.marketing.income.report.tree</field>
+        <field name="model">mysdb.marketing.income.report</field>
+        <field name="arch" type="xml">
+            <tree string="Marketing Income Report" 
+                  decoration-success="achievement_percent &gt;= 100" 
+                  decoration-warning="achievement_percent &gt;= 70 and achievement_percent &lt; 100"
+                  decoration-danger="achievement_percent &lt; 70"
+                  export_xlsx="1">
+                <field name="achievement_percent" invisible="1"/>
+                <field name="period" string="Period"/>
+                <field name="period_year" string="Year" optional="show"/>
+                <field name="period_month" string="Month" optional="show"/>
+                <field name="account_id_mysdb" string="Account ID"/>
+                <field name="account_name_ar" string="Account"/>
+                <field name="channel_name_ar" string="Channel"/>
+                <field name="channel_type" string="Type"/>
+                <field name="total_income" string="Income" sum="Total Income" widget="monetary"/>
+                <field name="target_amount" string="Target" sum="Total Target" widget="monetary"/>
+                <field name="achievement_percent" string="Achievement %" widget="percentage"
+                       decoration-success="achievement_percent &gt;= 100"
+                       decoration-warning="achievement_percent &gt;= 70 and achievement_percent &lt; 100"
+                       decoration-danger="achievement_percent &lt; 70"/>
+                <field name="cost_amount" string="Cost" sum="Total Cost" widget="monetary" optional="hide"/>
+                <field name="profit" string="Profit" sum="Total Profit" widget="monetary"/>
+                <field name="roi" string="ROI %" widget="percentage" optional="show"/>
+                <field name="order_count" string="Orders" sum="Total Orders"/>
+                <field name="product_count" string="Products" optional="hide"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="view_mysdb_marketing_income_report_search" model="ir.ui.view">
+        <field name="name">mysdb.marketing.income.report.search</field>
+        <field name="model">mysdb.marketing.income.report</field>
+        <field name="arch" type="xml">
+            <search string="Marketing Income">
+                <field name="account_name_ar"/>
+                <field name="account_id_mysdb"/>
+                <field name="channel_name_ar"/>
+                <field name="channel_type"/>
+                <field name="period"/>
+                <separator/>
+                <filter string="Current Year" name="filter_current_year" 
+                        domain="[('period_year', '=', context_today().strftime('%Y'))]"/>
+                <filter string="Last 3 Months" name="filter_last_3m" 
+                        domain="[('period', '&gt;=', (context_today() - relativedelta(months=3)).strftime('%Y%m'))]"/>
+                <separator/>
+                <filter string="WhatsApp" name="filter_whatsapp" domain="[('channel_type', '=', 'whatsapp')]"/>
+                <filter string="SnapChat" name="filter_snapchat" domain="[('channel_type', '=', 'snapchat')]"/>
+                <filter string="Instagram" name="filter_instagram" domain="[('channel_type', '=', 'instagram')]"/>
+                <filter string="Facebook" name="filter_facebook" domain="[('channel_type', '=', 'facebook')]"/>
+                <separator/>
+                <filter string="Achieving Target" name="filter_achieving" 
+                        domain="[('achievement_percent', '&gt;=', 100)]"/>
+                <filter string="Below Target" name="filter_below" 
+                        domain="[('achievement_percent', '&lt;', 100)]"/>
+                <separator/>
+                <filter string="Profitable" name="filter_profitable" 
+                        domain="[('profit', '&gt;', 0)]"/>
+                <filter string="High ROI (&gt;100%)" name="filter_high_roi" 
+                        domain="[('roi', '&gt;', 100)]"/>
+                <group expand="0" string="Group By">
+                    <filter string="Period" name="group_period" context="{'group_by': 'period'}"/>
+                    <filter string="Year" name="group_year" context="{'group_by': 'period_year'}"/>
+                    <filter string="Channel Type" name="group_channel_type" context="{'group_by': 'channel_type'}"/>
+                    <filter string="Channel" name="group_channel" context="{'group_by': 'channel_name_ar'}"/>
+                    <filter string="Account" name="group_account" context="{'group_by': 'account_name_ar'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="view_mysdb_marketing_income_report_graph" model="ir.ui.view">
+        <field name="name">mysdb.marketing.income.report.graph</field>
+        <field name="model">mysdb.marketing.income.report</field>
+        <field name="arch" type="xml">
+            <graph string="Marketing Income Analysis" type="bar">
+                <field name="period" type="row"/>
+                <field name="channel_type" type="col"/>
+                <field name="total_income" type="measure"/>
+                <field name="cost_amount" type="measure"/>
+                <field name="profit" type="measure"/>
+            </graph>
+        </field>
+    </record>
+
+    <record id="view_mysdb_marketing_income_report_pivot" model="ir.ui.view">
+        <field name="name">mysdb.marketing.income.report.pivot</field>
+        <field name="model">mysdb.marketing.income.report</field>
+        <field name="arch" type="xml">
+            <pivot string="Marketing Income Analysis">
+                <field name="period_year" type="row"/>
+                <field name="period_month" type="row"/>
+                <field name="channel_type" type="col"/>
+                <field name="total_income" type="measure"/>
+                <field name="profit" type="measure"/>
+                <field name="roi" type="measure"/>
+            </pivot>
+        </field>
+    </record>
+
+    <record id="action_mysdb_marketing_income_report" model="ir.actions.act_window">
+        <field name="name">Marketing Income Analysis</field>
+        <field name="res_model">mysdb.marketing.income.report</field>
+        <field name="view_mode">tree,graph,pivot</field>
+        <field name="context">{'search_default_filter_current_year': 1}</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">
+                No income data yet!
+            </p>
+            <p>
+                This report shows income, targets, and achievement by marketing account and period.
+                Analyze campaign effectiveness and ROI by channel type.
+            </p>
+        </field>
+    </record>
+
+    <!-- ========================================
+         BULK ASSIGNMENT WIZARDS
+         ======================================== -->
+
+    <!-- Bulk Project Assignment Wizard -->
+    <record id="view_mysdb_bulk_assign_project_wizard_form" model="ir.ui.view">
+        <field name="name">mysdb.bulk.assign.project.wizard.form</field>
+        <field name="model">mysdb.bulk.assign.project.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Bulk Assign Products to Project">
+                <group>
+                    <group string="Target">
+                        <field name="project_id" options="{'no_create': True}"/>
+                    </group>
+                    <group string="Filters">
+                        <field name="store_id" options="{'no_create': True}"/>
+                        <field name="assignment_filter"/>
+                    </group>
+                </group>
+                <group>
+                    <group>
+                        <field name="replace_existing"/>
+                    </group>
+                    <group>
+                        <label for="preview_count" string="Products Selected"/>
+                        <div>
+                            <field name="preview_count" class="oe_inline"/> products
+                        </div>
+                    </group>
+                </group>
+                <notebook>
+                    <page string="Products to Assign">
+                        <field name="product_ids" widget="many2many" nolabel="1"
+                               context="{'search_default_filter_no_project': 1}"
+                               options="{'no_create': True, 'no_open': True}">
+                            <tree>
+                                <field name="product_sku"/>
+                                <field name="product_name"/>
+                                <field name="store_id"/>
+                                <field name="assignment_status" widget="badge" 
+                                       decoration-success="assignment_status == 'complete'"
+                                       decoration-warning="assignment_status == 'partial'"
+                                       decoration-danger="assignment_status == 'none'"/>
+                            </tree>
+                        </field>
+                    </page>
+                </notebook>
+                <footer>
+                    <button name="action_assign" string="Assign Products" type="object" class="btn-primary"/>
+                    <button string="Cancel" class="btn-secondary" special="cancel"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_mysdb_bulk_assign_project" model="ir.actions.act_window">
+        <field name="name">Bulk Assign to Project</field>
+        <field name="res_model">mysdb.bulk.assign.project.wizard</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+        <field name="binding_model_id" ref="model_mysdb_product"/>
+        <field name="binding_view_types">list</field>
+    </record>
+
+    <!-- Bulk Marketing Assignment Wizard -->
+    <record id="view_mysdb_bulk_assign_marketing_wizard_form" model="ir.ui.view">
+        <field name="name">mysdb.bulk.assign.marketing.wizard.form</field>
+        <field name="model">mysdb.bulk.assign.marketing.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Bulk Assign Products to Marketing Account">
+                <group>
+                    <group string="Target">
+                        <field name="account_id" options="{'no_create': True}"/>
+                    </group>
+                    <group string="Filters">
+                        <field name="store_id" options="{'no_create': True}"/>
+                        <field name="assignment_filter"/>
+                    </group>
+                </group>
+                <group>
+                    <group>
+                    </group>
+                    <group>
+                        <label for="preview_count" string="Products Selected"/>
+                        <div>
+                            <field name="preview_count" class="oe_inline"/> products
+                        </div>
+                    </group>
+                </group>
+                <notebook>
+                    <page string="Products to Assign">
+                        <field name="product_ids" widget="many2many" nolabel="1"
+                               context="{'search_default_filter_no_marketing': 1}"
+                               options="{'no_create': True, 'no_open': True}">
+                            <tree>
+                                <field name="product_sku"/>
+                                <field name="product_name"/>
+                                <field name="store_id"/>
+                                <field name="assignment_status" widget="badge" 
+                                       decoration-success="assignment_status == 'complete'"
+                                       decoration-warning="assignment_status == 'partial'"
+                                       decoration-danger="assignment_status == 'none'"/>
+                            </tree>
+                        </field>
+                    </page>
+                </notebook>
+                <footer>
+                    <button name="action_assign" string="Assign Products" type="object" class="btn-primary"/>
+                    <button string="Cancel" class="btn-secondary" special="cancel"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_mysdb_bulk_assign_marketing" model="ir.actions.act_window">
+        <field name="name">Bulk Assign to Marketing Account</field>
+        <field name="res_model">mysdb.bulk.assign.marketing.wizard</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+        <field name="binding_model_id" ref="model_mysdb_product"/>
+        <field name="binding_view_types">list</field>
+    </record>
+
+    <!-- Bulk Period Creation Wizard -->
+    <record id="view_mysdb_bulk_period_creation_wizard_form" model="ir.ui.view">
+        <field name="name">mysdb.bulk.period.creation.wizard.form</field>
+        <field name="model">mysdb.bulk.period.creation.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Bulk Period Creation">
+                <group>
+                    <group string="Step 1: Select Target">
+                        <field name="target_type" widget="radio"/>
+                        <field name="project_id" attrs="{'invisible': [('target_type', '!=', 'project')], 'required': [('target_type', '=', 'project')]}"/>
+                        <field name="marketing_account_id" attrs="{'invisible': [('target_type', '!=', 'marketing')], 'required': [('target_type', '=', 'marketing')]}"/>
+                    </group>
+                    <group string="Step 2: Select Periods">
+                        <field name="year"/>
+                        <field name="create_yearly"/>
+                        <field name="create_monthly"/>
+                        <field name="select_specific_months" attrs="{'invisible': [('create_monthly', '=', False)]}"/>
+                    </group>
+                </group>
+                
+                <group string="Select Specific Months" attrs="{'invisible': ['|', ('create_monthly', '=', False), ('select_specific_months', '=', False)]}">
+                    <group>
+                        <field name="month_01" string="January"/>
+                        <field name="month_02" string="February"/>
+                        <field name="month_03" string="March"/>
+                        <field name="month_04" string="April"/>
+                        <field name="month_05" string="May"/>
+                        <field name="month_06" string="June"/>
+                    </group>
+                    <group>
+                        <field name="month_07" string="July"/>
+                        <field name="month_08" string="August"/>
+                        <field name="month_09" string="September"/>
+                        <field name="month_10" string="October"/>
+                        <field name="month_11" string="November"/>
+                        <field name="month_12" string="December"/>
+                    </group>
+                </group>
+                
+                <group>
+                    <group string="Step 3: Financial Values">
+                        <field name="target_amount" widget="monetary"/>
+                        <field name="distribution_type"/>
+                    </group>
+                    <group string="Cost Calculation">
+                        <field name="cost_calculation_type" widget="radio"/>
+                        <field name="cost_percentage" 
+                               attrs="{'invisible': [('cost_calculation_type', '!=', 'percentage')], 'required': [('cost_calculation_type', '=', 'percentage')]}"
+                               widget="percentage"/>
+                        <field name="cost_amount" 
+                               widget="monetary"
+                               attrs="{'readonly': [('cost_calculation_type', '=', 'percentage')]}"/>
+                    </group>
+                </group>
+                
+                <group string="Preview">
+                    <group>
+                        <div class="alert alert-info" style="margin-bottom: 0;">
+                            <strong>Periods to Create: <field name="preview_count" class="oe_inline"/> record(s)</strong>
+                        </div>
+                    </group>
+                    <group>
+                        <field name="preview_text" nolabel="1" readonly="1" 
+                               widget="text" 
+                               style="font-family: monospace; white-space: pre-wrap;"/>
+                    </group>
+                </group>
+                
+                <footer>
+                    <button name="action_create_periods" string="Create Periods" type="object" class="btn-primary"/>
+                    <button string="Cancel" class="btn-secondary" special="cancel"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_mysdb_bulk_period_creation" model="ir.actions.act_window">
+        <field name="name">Bulk Create Periods</field>
+        <field name="res_model">mysdb.bulk.period.creation.wizard</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+    </record>
+
+</odoo>
+
