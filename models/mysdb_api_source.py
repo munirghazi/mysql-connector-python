@@ -758,8 +758,28 @@ class MysdbApiSource(models.Model):
                 env = odoo.api.Environment(cr, uid, {})
                 sources = env['mysdb.api.source'].browse(rec_ids).exists()
                 for rec in sources:
-                    rec._do_sync_details()
-                cr.commit()
+                    try:
+                        rec._do_sync_details()
+                    except Exception as e:
+                        _logger.exception(
+                            "Detail sync crashed for source %s: %s",
+                            rec.name, str(e)[:500],
+                        )
+                        try:
+                            cr.rollback()
+                            rec.write({
+                                'detail_last_sync_at': fields.Datetime.now(),
+                                'detail_last_sync_status': 'error',
+                                'detail_last_sync_message': (
+                                    "Background thread error: %s" % str(e)[:500]
+                                ),
+                            })
+                            cr.commit()
+                        except Exception:
+                            _logger.exception(
+                                "Failed to write error status for detail sync %s",
+                                rec.name,
+                            )
         except Exception:
             _logger.exception(
                 "Background detail sync thread crashed (ids=%s)", rec_ids
@@ -866,7 +886,21 @@ class MysdbApiSource(models.Model):
             for idx, (pid, parent) in enumerate(to_fetch):
                 try:
                     url = rec.detail_url_pattern.replace('{id}', str(pid))
-                    payload, _raw = rec._fetch_json(url)
+                    # Retry on 429 (rate limit)
+                    for attempt in range(4):
+                        try:
+                            payload, _raw = rec._fetch_json(url)
+                            break
+                        except Exception as fetch_err:
+                            if '429' in str(fetch_err) and attempt < 3:
+                                wait = 5 * (attempt + 1)
+                                _logger.warning(
+                                    "Detail sync rate limited for %s, waiting %ss (attempt %s)",
+                                    pid, wait, attempt + 1,
+                                )
+                                time.sleep(wait)
+                                continue
+                            raise
                     total_fetched += 1
 
                     # Resolve detail_data_root_key (dot-notation)
@@ -877,15 +911,23 @@ class MysdbApiSource(models.Model):
                             "Detail sync: no items for parent %s", pid,
                         )
                     else:
-                        page_created, page_updated, page_errors = (
-                            rec._upsert_detail_items(
-                                items, parent_context, mapping,
-                                detail_model, detail_fields,
+                        try:
+                            with self.env.cr.savepoint():
+                                page_created, page_updated, page_errors = (
+                                    rec._upsert_detail_items(
+                                        items, parent_context, mapping,
+                                        detail_model, detail_fields,
+                                    )
+                                )
+                                total_created += page_created
+                                total_updated += page_updated
+                                total_errors += page_errors
+                        except Exception as upsert_err:
+                            total_errors += 1
+                            _logger.warning(
+                                "Detail upsert error for parent %s: %s",
+                                pid, str(upsert_err)[:300],
                             )
-                        )
-                        total_created += page_created
-                        total_updated += page_updated
-                        total_errors += page_errors
 
                 except Exception as e:
                     total_errors += 1
@@ -894,22 +936,23 @@ class MysdbApiSource(models.Model):
                         pid, str(e)[:300],
                     )
 
-                # Progress update & commit every 20 records
-                if (idx + 1) % 20 == 0 or idx == len(to_fetch) - 1:
-                    rec.write({
-                        'detail_last_sync_message': (
-                            "Progress: %s/%s fetched, %s created, "
-                            "%s updated, %s errors"
-                            % (
-                                idx + 1, len(to_fetch),
-                                total_created, total_updated, total_errors,
-                            )
-                        ),
-                        'detail_last_sync_count': total_created + total_updated,
-                    })
-                    self.env.cr.commit()
-                else:
-                    self.env.cr.commit()
+                # Progress update & commit every 5 records
+                if (idx + 1) % 5 == 0 or idx == len(to_fetch) - 1:
+                    try:
+                        rec.write({
+                            'detail_last_sync_message': (
+                                "Progress: %s/%s fetched, %s created, "
+                                "%s updated, %s errors"
+                                % (
+                                    idx + 1, len(to_fetch),
+                                    total_created, total_updated, total_errors,
+                                )
+                            ),
+                            'detail_last_sync_count': total_created + total_updated,
+                        })
+                    except Exception:
+                        self.env.cr.rollback()
+                self.env.cr.commit()
 
                 if rec.detail_request_delay:
                     time.sleep(rec.detail_request_delay)
