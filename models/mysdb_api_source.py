@@ -903,6 +903,10 @@ class MysdbApiSource(models.Model):
                             raise
                     total_fetched += 1
 
+                    # Dump raw JSON if enabled
+                    if rec.dump_json and _raw:
+                        rec._dump_raw_json(_raw, f"detail_{pid}")
+
                     # Resolve detail_data_root_key (dot-notation)
                     parent_context, items = rec._extract_detail_items(payload)
 
@@ -1200,6 +1204,16 @@ class MysdbApiSource(models.Model):
                     'product_id_raw': str(pid) if pid else '',
                     'store_id': sid,
                 }
+
+        # Dump product catalog JSON if enabled
+        if rec.dump_json and unique_map:
+            dump_data = {
+                'store_id': store_id,
+                'total_unique_products': len(unique_map),
+                'products': list(unique_map.values()),
+            }
+            raw_bytes = json.dumps(dump_data, ensure_ascii=False, indent=2).encode('utf-8')
+            rec._dump_raw_json(raw_bytes, 'product_catalog')
 
         if not unique_map:
             return {
