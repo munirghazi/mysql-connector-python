@@ -613,7 +613,7 @@ class MysdbApiSource(models.Model):
 
     def _sync_project_list(self, item, detail_model):
         project_list = item.get('projectList') or []
-        if not isinstance(project_list, list):
+        if not isinstance(project_list, list) or not project_list:
             return
         order_id = item.get('id')
         if order_id is None:
@@ -636,15 +636,18 @@ class MysdbApiSource(models.Model):
         if isinstance(detail_created_at, str):
             detail_created_at = self._normalize_datetime(detail_created_at)
         if not detail_created_at or not detail_store_id:
-            order_rec = self.env['mysdb.order'].sudo().search(
-                [('order_id', '=', order_linked_id)],
-                limit=1
-            )
-            if order_rec:
-                if not detail_created_at:
-                    detail_created_at = order_rec.order_created_at or order_rec.created_at
-                if not detail_store_id:
-                    detail_store_id = order_rec.store_id
+            try:
+                order_rec = self.env['mysdb.order'].sudo().search(
+                    [('order_id', '=', order_linked_id)],
+                    limit=1
+                )
+                if order_rec:
+                    if not detail_created_at:
+                        detail_created_at = order_rec.order_created_at
+                    if not detail_store_id:
+                        detail_store_id = order_rec.store_id
+            except Exception:
+                pass
 
         for project in project_list:
             if not isinstance(project, dict):
@@ -657,39 +660,49 @@ class MysdbApiSource(models.Model):
             quantity = project.get('quantity')
             if quantity is None:
                 quantity = 0.0
-            total = float(unit_price) * float(quantity)
+            try:
+                total = float(unit_price) * float(quantity)
+            except (ValueError, TypeError):
+                total = 0.0
 
             if not product_name and not product_sku and total == 0.0:
                 continue
 
-            # Prefer a stable match (order + product identifiers). Fall back to amount/qty.
-            base_domain = [
-                ('order_linked_id', '=', order_linked_id),
-                ('product_name', '=', product_name),
-                ('product_sku', '=', product_sku),
-            ]
-            existing = detail_model.search(base_domain, limit=1)
-            if not existing:
-                fallback_domain = [
-                    ('order_linked_id', '=', order_linked_id),
-                    ('product_name', '=', product_name),
-                    ('total', '=', total),
-                    ('quantity', '=', quantity),
-                ]
-                existing = detail_model.search(fallback_domain, limit=1)
-            vals = {
-                'order_linked_id': order_linked_id,
-                'product_name': product_name,
-                'product_sku': product_sku,
-                'total': total,
-                'quantity': quantity,
-                'created_at': detail_created_at,
-                'store_id': detail_store_id,
-            }
-            if existing:
-                existing.write(vals)
-            else:
-                detail_model.create(vals)
+            try:
+                with self.env.cr.savepoint():
+                    # Prefer a stable match (order + product identifiers). Fall back to amount/qty.
+                    base_domain = [
+                        ('order_linked_id', '=', order_linked_id),
+                        ('product_name', '=', product_name),
+                        ('product_sku', '=', product_sku),
+                    ]
+                    existing = detail_model.search(base_domain, limit=1)
+                    if not existing:
+                        fallback_domain = [
+                            ('order_linked_id', '=', order_linked_id),
+                            ('product_name', '=', product_name),
+                            ('total', '=', total),
+                            ('quantity', '=', quantity),
+                        ]
+                        existing = detail_model.search(fallback_domain, limit=1)
+                    vals = {
+                        'order_linked_id': order_linked_id,
+                        'product_name': product_name,
+                        'product_sku': product_sku,
+                        'total': total,
+                        'quantity': quantity,
+                        'created_at': detail_created_at,
+                        'store_id': detail_store_id,
+                    }
+                    if existing:
+                        existing.write(vals)
+                    else:
+                        detail_model.create(vals)
+            except Exception as e:
+                _logger.warning(
+                    "sync_project_list: failed for order %s project %s: %s",
+                    order_linked_id, product_name[:50], str(e)[:200],
+                )
 
     # ==================================================================
     #  DETAIL SYNC – per-record child fetching (e.g. Zid order → products)
@@ -1332,19 +1345,39 @@ class MysdbApiSource(models.Model):
                     break
                 prev_page_ids = current_page_ids
 
-                created, updated = rec._upsert_items(items)
-                total_created += created
-                total_updated += updated
-                rec.write({
-                    'last_sync_page': page,
-                    'last_sync_page_items': len(items),
-                    'last_sync_page_created': created,
-                    'last_sync_page_updated': updated,
-                    'last_sync_message': (
-                        "Running… page %s | created %s | updated %s"
-                        % (page, total_created, total_updated)
-                    ),
-                })
+                try:
+                    with self.env.cr.savepoint():
+                        created, updated = rec._upsert_items(items)
+                        total_created += created
+                        total_updated += updated
+                except Exception as page_err:
+                    _logger.warning(
+                        "API Sync page %s upsert error (recovering): %s",
+                        page, str(page_err)[:300],
+                    )
+                    # Transaction is safe thanks to savepoint – continue
+
+                try:
+                    rec.write({
+                        'last_sync_page': page,
+                        'last_sync_page_items': len(items),
+                        'last_sync_page_created': created if 'created' in dir() else 0,
+                        'last_sync_page_updated': updated if 'updated' in dir() else 0,
+                        'last_sync_message': (
+                            "Running… page %s | created %s | updated %s"
+                            % (page, total_created, total_updated)
+                        ),
+                    })
+                except Exception:
+                    _logger.warning("Failed to write page progress, rolling back and retrying")
+                    self.env.cr.rollback()
+                    rec.write({
+                        'last_sync_page': page,
+                        'last_sync_message': (
+                            "Running… page %s | created %s | updated %s (recovered from error)"
+                            % (page, total_created, total_updated)
+                        ),
+                    })
 
                 # Commit after each page to persist progress.
                 self.env.cr.commit()
