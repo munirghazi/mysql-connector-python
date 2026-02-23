@@ -277,6 +277,12 @@ class MysdbApiSource(models.Model):
                     error_body = exc.read().decode('utf-8', errors='ignore')[:2000]
                 except Exception:
                     error_body = ''
+                # Treat 404 "Invalid page" as end-of-pagination (empty result)
+                if exc.code == 404 and 'invalid page' in error_body.lower():
+                    _logger.info(
+                        "API pagination end (404 Invalid page): url=%s", url,
+                    )
+                    return {}, b'{}'
                 raise ValidationError(
                     _("HTTP Error %s: %s\nURL: %s\nResponse: %s") % (
                         exc.code, exc.reason, url, error_body
