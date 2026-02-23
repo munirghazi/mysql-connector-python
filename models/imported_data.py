@@ -27,6 +27,12 @@ class ImportedData(models.Model):
     _name = 'imported.data'
     _description = 'Imported Data'
 
+    connection_id = fields.Many2one(
+        'mysdb.connector',
+        string='Connector',
+        help='Connector that created this log entry',
+        index=True
+    )
     model_id = fields.Many2one('ir.model', string='Model',
                                help='Name of the model', index=True)
     mysdb_ref = fields.Char(string='MySDB Reference',

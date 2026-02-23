@@ -1,14 +1,19 @@
 ﻿# -*- coding: utf-8 -*-
-from odoo import models, fields, api
-from odoo.exceptions import ValidationError
+import logging
 import calendar
 from datetime import datetime
+
+from odoo import models, fields, api
+from odoo.exceptions import ValidationError
+
+_logger = logging.getLogger(__name__)
 
 class MysdbOrder(models.Model):
     _name = 'mysdb.order'
     _description = 'MySDB Orders'
     _rec_name = 'order_code'
 
+    source_system = fields.Char('Source System', index=True)
     order_id = fields.Char('Order ID', required=True, index=True)
     order_code = fields.Char('Order Code')
     order_url = fields.Char('Order URL')
@@ -77,13 +82,50 @@ class MysdbOrderDetail(models.Model):
     product_sku = fields.Char('Product SKU', index=True)
     total = fields.Float('Total')
     currency_code = fields.Char('Currency')
-    store_id = fields.Char('Store ID')
+    store_id = fields.Char('Store ID', index=True)
     
     # Newly added fields
     invoice_link = fields.Char('Invoice Link')
     order_detail_uuid = fields.Char('Order Detail UUID', index=True)
     created_at = fields.Datetime('Created At')
     updated_at = fields.Datetime('Updated At')
+
+    def init(self):
+        """Create composite indexes for report view JOINs."""
+        self.env.cr.execute("""
+            CREATE INDEX IF NOT EXISTS mysdb_order_detail_sku_store_idx
+            ON mysdb_order_detail (product_sku, store_id)
+        """)
+        self.env.cr.execute("""
+            CREATE INDEX IF NOT EXISTS mysdb_order_detail_pid_store_idx
+            ON mysdb_order_detail (product_id, store_id)
+            WHERE product_id IS NOT NULL
+        """)
+
+    @api.model
+    def action_find_orphan_details(self):
+        """Find order details whose order_linked_id does not match any
+        order_id in mysdb_order for the same store_id."""
+        self.env.cr.execute("""
+            SELECT d.id
+            FROM mysdb_order_detail d
+            LEFT JOIN mysdb_order o
+                ON d.order_linked_id = o.order_id
+                AND (d.store_id = o.store_id OR d.store_id IS NULL OR o.store_id IS NULL)
+            WHERE d.order_linked_id IS NOT NULL
+              AND o.id IS NULL
+        """)
+        orphan_ids = [row[0] for row in self.env.cr.fetchall()]
+        _logger.info("Found %d orphan order details (order_linked_id not in orders for same store).", len(orphan_ids))
+        return {
+            'name': f'Orphan Order Details ({len(orphan_ids)})',
+            'type': 'ir.actions.act_window',
+            'res_model': 'mysdb.order.detail',
+            'view_mode': 'tree,form',
+            'domain': [('id', 'in', orphan_ids)],
+            'target': 'current',
+            'context': {'search_default_group_by_store': 1},
+        }
 
 class MysdbProduct(models.Model):
     _name = 'mysdb.product'
@@ -95,9 +137,40 @@ class MysdbProduct(models.Model):
     product_name_ar = fields.Char('Product Name (AR)')
     product_sku = fields.Char('Product SKU', index=True)
     product_slug = fields.Char('Product Slug')
-    store_id = fields.Char('Store ID')
+    store_id = fields.Char('Store ID', index=True)
+    section_id = fields.Many2one('mysdb.section', string='Section', ondelete='set null')
     product_price = fields.Float('Price')
     product_quantity = fields.Float('Quantity')
+    category_id = fields.Char('Category ID')
+    category_name = fields.Char('Category Name')
+    donate_type_id = fields.Char('Donate Type ID')
+    donate_type_name = fields.Char('Donate Type Name')
+    creation_date = fields.Datetime('Creation Date')
+    association_id = fields.Char('Association ID')
+    association_name = fields.Char('Association Name')
+    branch_name = fields.Char('Branch Name')
+    project_code = fields.Char('Project Code')
+    portal_url = fields.Char('Portal URL')
+    project_link = fields.Char('Project Link')
+    project_view_link = fields.Char('Project View Link')
+    affiliate_link_project = fields.Char('Affiliate Link Project')
+    affiliate_link_project_case = fields.Char('Affiliate Link Project Case')
+    affiliate_link_gift = fields.Char('Affiliate Link Gift')
+    affiliate_link_product = fields.Char('Affiliate Link Product')
+    logo = fields.Char('Logo URL')
+    logo_webp = fields.Char('Logo WebP URL')
+    required_amount = fields.Float('Required Amount')
+    total_donation_amount = fields.Float('Total Donation Amount')
+    total_donation_amount_actual = fields.Float('Total Donation Amount Actual')
+    donor_count = fields.Integer('Donor Count')
+    ratio = fields.Float('Ratio')
+    sort_index = fields.Integer('Sort Index')
+    is_active = fields.Boolean('Is Active')
+    start_date_text = fields.Char('Start Date Text')
+    end_date_text = fields.Char('End Date Text')
+    short_description = fields.Text('Short Description')
+    start_date = fields.Datetime('Start Date')
+    end_date = fields.Datetime('End Date')
     
     # Assignment Status Tracking
     has_project = fields.Boolean('Has Project', compute='_compute_assignment_status', store=True, 
@@ -140,59 +213,75 @@ class MysdbProduct(models.Model):
 
     @api.model
     def _search(self, domain, offset=0, limit=None, order=None, access_rights_uid=None):
-        try:
-            # Handle bulk assignment wizard filters
-            if self._context.get('filter_assignment'):
-                filter_assignment = self._context.get('filter_assignment')
-                if filter_assignment == 'unassigned':
-                    # Filter for products without project or marketing (depending on wizard type)
-                    # Check if we're in project or marketing wizard by checking context
-                    if 'default_project_id' in self._context or self._context.get('filter_type') == 'project':
-                        domain = [('has_project', '=', False)] + domain
-                    elif 'default_account_id' in self._context or self._context.get('filter_type') == 'marketing':
-                        domain = [('has_marketing', '=', False)] + domain
-                    else:
-                        # Default to project filter
-                        domain = [('has_project', '=', False)] + domain
-                elif filter_assignment == 'incomplete':
-                    domain = [('assignment_status', 'in', ['partial', 'none'])] + domain
-                # 'all' means no additional filter
-            
-            if self._context.get('filter_store_id'):
-                store_val = self._context.get('filter_store_id')
-                if store_val:
-                    # Handle different formats: int ID, tuple (id, name), or list [id]
-                    store_rec_id = None
-                    if isinstance(store_val, (list, tuple)) and len(store_val) > 0:
-                        store_rec_id = store_val[0] if isinstance(store_val[0], int) else None
-                    elif isinstance(store_val, int):
-                        store_rec_id = store_val
-                    
-                    if store_rec_id:
-                        # Resolve the store record ID to store_code
-                        store_rec = self.env['mysdb.store'].browse(store_rec_id)
-                        if store_rec and store_rec.store_code:
-                            domain = [('store_id', '=', store_rec.store_code)] + domain
-            
-            if self._context.get('filter_used_products'):
-                self.env.cr.execute("SELECT product_id FROM mysdb_product_relation WHERE product_id IS NOT NULL")
-                used_ids = [r[0] for r in self.env.cr.fetchall()]
-                
-                active_id = self._context.get('active_id') or self._context.get('id')
-                if not active_id and 'params' in self._context:
-                    active_id = self._context['params'].get('id')
+        # Handle bulk assignment wizard filters
+        filter_assignment = self._context.get('filter_assignment')
+        if filter_assignment:
+            if filter_assignment == 'unassigned':
+                # Filter for products without project or marketing (depending on wizard type)
+                if (
+                    'default_project_id' in self._context
+                    or 'default_section_id' in self._context
+                    or self._context.get('filter_type') in ('project', 'section')
+                ):
+                    domain = [('has_project', '=', False)] + domain
+                elif 'default_account_id' in self._context or self._context.get('filter_type') == 'marketing':
+                    domain = [('has_marketing', '=', False)] + domain
+                else:
+                    # Default to project filter
+                    domain = [('has_project', '=', False)] + domain
+            elif filter_assignment == 'incomplete':
+                domain = [('assignment_status', 'in', ['partial', 'none'])] + domain
+            # 'all' means no additional filter
 
-                if active_id and isinstance(active_id, int):
-                    self.env.cr.execute("SELECT product_id FROM mysdb_product_relation WHERE id = %s", (active_id,))
-                    res = self.env.cr.fetchone()
-                    if res and res[0]:
-                        used_ids = [uid for uid in used_ids if uid != res[0]]
-                
-                if used_ids:
-                    domain = [('id', 'not in', used_ids)] + domain
-        except Exception:
-            pass
+        store_val = self._context.get('filter_store_id')
+        if store_val:
+            # Handle different formats: int ID, tuple (id, name), or list [id]
+            store_rec_id = None
+            if isinstance(store_val, (list, tuple)) and len(store_val) > 0:
+                store_rec_id = store_val[0] if isinstance(store_val[0], int) else None
+            elif isinstance(store_val, int):
+                store_rec_id = store_val
+
+            if store_rec_id:
+                # Resolve the store record ID to store_code
+                store_rec = self.env['mysdb.store'].browse(store_rec_id).exists()
+                if store_rec and store_rec.store_code:
+                    domain = [('store_id', '=', store_rec.store_code)] + domain
+                else:
+                    _logger.warning(
+                        "MysdbProduct._search: filter_store_id=%s resolved to missing/empty store record",
+                        store_rec_id,
+                    )
+
+        if self._context.get('filter_used_products'):
+            self.env.cr.execute("SELECT product_id FROM mysdb_product_relation WHERE product_id IS NOT NULL")
+            used_ids = [r[0] for r in self.env.cr.fetchall()]
+
+            active_id = self._context.get('active_id') or self._context.get('id')
+            if not active_id and 'params' in self._context:
+                active_id = self._context['params'].get('id')
+
+            if active_id and isinstance(active_id, int):
+                self.env.cr.execute("SELECT product_id FROM mysdb_product_relation WHERE id = %s", (active_id,))
+                res = self.env.cr.fetchone()
+                if res and res[0]:
+                    used_ids = [uid for uid in used_ids if uid != res[0]]
+
+            if used_ids:
+                domain = [('id', 'not in', used_ids)] + domain
+
         return super()._search(domain, offset, limit, order, access_rights_uid)
+
+    def init(self):
+        """Create composite indexes for report view JOINs."""
+        self.env.cr.execute("""
+            CREATE INDEX IF NOT EXISTS mysdb_product_sku_store_idx
+            ON mysdb_product (product_sku, store_id)
+        """)
+        self.env.cr.execute("""
+            CREATE INDEX IF NOT EXISTS mysdb_product_pid_store_idx
+            ON mysdb_product (product_id, store_id)
+        """)
 
 class MysdbSection(models.Model):
     _name = 'mysdb.section'
@@ -202,6 +291,7 @@ class MysdbSection(models.Model):
     section_id_mysdb = fields.Char('Section ID', required=True, index=True)
     section_name_ar = fields.Char('Section Name (AR)')
     section_name_en = fields.Char('Section Name (EN)')
+    project_id = fields.Many2one('mysdb.project', string='Project', ondelete='set null')
     
     display_name = fields.Char(compute='_compute_display_name')
 
@@ -218,7 +308,12 @@ class MysdbProject(models.Model):
     project_id_mysdb = fields.Char('Project ID', required=True, index=True)
     project_name_ar = fields.Char('Project Name (AR)')
     project_name_en = fields.Char('Project Name (EN)')
-    section_id = fields.Many2one('mysdb.section', string='Section', required=True)
+    section_id = fields.Many2one(
+        'mysdb.section',
+        string='Legacy Section (deprecated)',
+        required=False,
+        help='Legacy field. Use Section -> Project instead.'
+    )
     store_id = fields.Many2one('mysdb.store', string='Store')
 
     @api.model
@@ -291,21 +386,45 @@ class MysdbProductRelation(models.Model):
     _rec_name = 'product_id'
 
     product_id = fields.Many2one('mysdb.product', string='Product', required=True, ondelete='cascade')
-    project_id = fields.Many2one('mysdb.project', string='Project', ondelete='set null')
+    section_id = fields.Many2one('mysdb.section', string='Section', ondelete='set null')
+    project_id = fields.Many2one(
+        'mysdb.project',
+        string='Project',
+        related='section_id.project_id',
+        store=True,
+        readonly=True
+    )
 
-    @api.constrains('product_id', 'project_id')
+    @api.constrains('product_id', 'section_id')
     def _check_store_match(self):
         for rec in self:
-            if rec.product_id and rec.project_id:
+            project = rec.project_id or (rec.section_id and rec.section_id.project_id)
+            if rec.product_id and project and project.store_id:
                 product_store = rec.product_id.sudo().store_id
-                project_store = rec.project_id.sudo().store_id.store_code
+                project_store = project.sudo().store_id.store_code
                 if product_store != project_store:
                     raise ValidationError(
                         f"Store Mismatch! \n\n"
                         f"Product '{rec.product_id.display_name}' belongs to Store ID: {product_store}\n"
-                        f"Project '{rec.project_id.display_name}' belongs to Store ID: {project_store}\n\n"
+                        f"Project '{project.display_name}' belongs to Store ID: {project_store}\n\n"
                         f"Please ensure both belong to the same Store."
                     )
+
+    @api.model_create_multi
+    def create(self, vals_list):
+        records = super().create(vals_list)
+        for rec in records:
+            if rec.section_id and rec.product_id:
+                rec.product_id.write({'section_id': rec.section_id.id})
+        return records
+
+    def write(self, vals):
+        res = super().write(vals)
+        if 'section_id' in vals:
+            for rec in self:
+                if rec.section_id and rec.product_id:
+                    rec.product_id.write({'section_id': rec.section_id.id})
+        return res
 
     def _compute_display_name(self):
         for rec in self:
@@ -421,86 +540,100 @@ class MysdbPeriodTargetCost(models.Model):
 
     @api.depends('period', 'target_object', 'target')
     def _compute_achievement(self):
+        # ── 1. Set safe defaults for ALL records first ──────────────────
         for rec in self:
-            income = 0.0
-            if rec.period and rec.target_object:
+            rec.actual_income = 0.0
+            rec.achievement_percent = 0.0
+            rec.variance = -rec.target if rec.target else 0.0
+            rec.profit = -rec.cost if rec.cost else 0.0
+            rec.roi = 0.0
+
+        valid_recs = self.filtered(lambda r: r.period and r.target_object)
+        if not valid_recs:
+            return
+
+        # ── 2. Group records by target model name ───────────────────────
+        by_model = {}
+        for rec in valid_recs:
+            model_name = rec.target_object._name
+            by_model.setdefault(model_name, [])
+            by_model[model_name].append(rec)
+
+        for model_name, recs in by_model.items():
+            # Determine the relation JOIN and grouping column
+            # Product join: match by product_id first, fallback to product_sku
+            product_join = (
+                "JOIN mysdb_product p ON (d.store_id = p.store_id OR d.store_id IS NULL OR p.store_id IS NULL) "
+                "  AND ((d.product_id IS NOT NULL AND d.product_id = p.product_id) "
+                "       OR (d.product_id IS NULL AND d.product_sku IS NOT NULL AND d.product_sku = p.product_sku))"
+            )
+            if model_name == 'mysdb.project':
+                relation_join = (
+                    product_join + " "
+                    "JOIN mysdb_product_relation pr ON p.id = pr.product_id"
+                )
+                group_col = "pr.project_id"
+            elif model_name == 'mysdb.marketing_account':
+                relation_join = (
+                    product_join + " "
+                    "JOIN mysdb_product_marketing_relation pmr ON p.id = pmr.product_id"
+                )
+                group_col = "pmr.account_id"
+            elif model_name == 'mysdb.section':
+                relation_join = (
+                    product_join + " "
+                    "JOIN mysdb_product_relation pr ON p.id = pr.product_id"
+                )
+                group_col = "pr.section_id"
+            else:
+                continue
+
+            # ── 3. Collect unique target IDs and period date-ranges ─────
+            target_ids = list({rec.target_object.id for rec in recs})
+            period_ranges = {}  # period_code → (date_start, date_end)
+            for rec in recs:
+                if rec.period in period_ranges:
+                    continue
                 year = rec.period[:4]
                 month = rec.period[4:]
-                
-                # Define Domain for Orders
-                domain = [('payment_status', '=', 'paid')]
                 if month == '00':
-                    # Yearly
-                    date_start = f"{year}-01-01 00:00:00"
-                    date_end = f"{year}-12-31 23:59:59"
+                    ds = f"{year}-01-01"
+                    de = f"{year}-12-31 23:59:59"
                 else:
-                    # Monthly
-                    import calendar
                     last_day = calendar.monthrange(int(year), int(month))[1]
-                    date_start = f"{year}-{month}-01 00:00:00"
-                    date_end = f"{year}-{month}-{last_day} 23:59:59"
-                
-                domain += [('order_created_at', '>=', date_start), ('order_created_at', '<=', date_end)]
-                
-                # Find Order IDs in range
-                orders = self.env['mysdb.order'].sudo().search(domain)
-                order_ids = orders.mapped('order_id')
-                
-                if order_ids:
-                    # Get relevant details
-                    detail_domain = [('order_linked_id', 'in', order_ids)]
-                    
-                    if rec.target_object._name == 'mysdb.project':
-                        # Project income: find products in this project
-                        project_id = rec.target_object.id
-                        self.env.cr.execute("""
-                            SELECT p.product_sku 
-                            FROM mysdb_product p
-                            JOIN mysdb_product_relation pr ON p.id = pr.product_id
-                            WHERE pr.project_id = %s
-                        """, (project_id,))
-                        skus = [r[0] for r in self.env.cr.fetchall()]
-                        if skus:
-                            detail_domain += [('product_sku', 'in', skus)]
-                            details = self.env['mysdb.order.detail'].sudo().search(detail_domain)
-                            income = sum(details.mapped('total'))
-                            
-                    elif rec.target_object._name == 'mysdb.marketing_account':
-                        # Account income: find products in this account
-                        account_id = rec.target_object.id
-                        self.env.cr.execute("""
-                            SELECT p.product_sku 
-                            FROM mysdb_product p
-                            JOIN mysdb_product_marketing_relation pmr ON p.id = pmr.product_id
-                            WHERE pmr.account_id = %s
-                        """, (account_id,))
-                        skus = [r[0] for r in self.env.cr.fetchall()]
-                        if skus:
-                            detail_domain += [('product_sku', 'in', skus)]
-                            details = self.env['mysdb.order.detail'].sudo().search(detail_domain)
-                            income = sum(details.mapped('total'))
-                            
-                    elif rec.target_object._name == 'mysdb.section':
-                        # Section income: find products in projects in this section
-                        section_id = rec.target_object.id
-                        self.env.cr.execute("""
-                            SELECT p.product_sku 
-                            FROM mysdb_product p
-                            JOIN mysdb_product_relation pr ON p.id = pr.product_id
-                            JOIN mysdb_project proj ON pr.project_id = proj.id
-                            WHERE proj.section_id = %s
-                        """, (section_id,))
-                        skus = [r[0] for r in self.env.cr.fetchall()]
-                        if skus:
-                            detail_domain += [('product_sku', 'in', skus)]
-                            details = self.env['mysdb.order.detail'].sudo().search(detail_domain)
-                            income = sum(details.mapped('total'))
+                    ds = f"{year}-{month}-01"
+                    de = f"{year}-{month}-{last_day:02d} 23:59:59"
+                period_ranges[rec.period] = (ds, de)
 
-            rec.actual_income = income
-            rec.achievement_percent = (income / rec.target * 100.0) if rec.target > 0 else 0.0
-            rec.variance = income - rec.target
-            rec.profit = income - rec.cost
-            rec.roi = ((income - rec.cost) / rec.cost * 100.0) if rec.cost > 0 else 0.0
+            # ── 4. ONE query per unique period (all target IDs at once) ─
+            # Worst case: 12 months × 3 model types = 36 queries total
+            # instead of N × 4 queries per record in the original code.
+            income_map = {}  # (target_id, period) → income
+            for period_code, (date_start, date_end) in period_ranges.items():
+                query = f"""
+                    SELECT {group_col} AS target_id,
+                           COALESCE(SUM(d.total), 0.0) AS income
+                    FROM mysdb_order o
+                    JOIN mysdb_order_detail d ON o.order_id = d.order_linked_id
+                    {relation_join}
+                    WHERE o.payment_status = 'paid'
+                      AND o.order_created_at >= %s
+                      AND o.order_created_at <= %s
+                      AND {group_col} IN %s
+                    GROUP BY {group_col}
+                """
+                self.env.cr.execute(query, (date_start, date_end, tuple(target_ids)))
+                for row in self.env.cr.fetchall():
+                    income_map[(row[0], period_code)] = row[1]
+
+            # ── 5. Assign batched results back to records ───────────────
+            for rec in recs:
+                income = income_map.get((rec.target_object.id, rec.period), 0.0)
+                rec.actual_income = income
+                rec.achievement_percent = (income / rec.target * 100.0) if rec.target > 0 else 0.0
+                rec.variance = income - rec.target
+                rec.profit = income - rec.cost
+                rec.roi = ((income - rec.cost) / rec.cost * 100.0) if rec.cost > 0 else 0.0
 
     # Helper fields for CSV Import
     import_type = fields.Selection([
@@ -587,6 +720,7 @@ class MysdbOrderReport(models.Model):
     order_created_at = fields.Datetime('Order Created At', readonly=True)
     customer_name = fields.Char('Customer', readonly=True)
     product_name = fields.Char('Product', readonly=True)
+    product_id_char = fields.Char('Product ID', readonly=True)
     product_sku = fields.Char('SKU', readonly=True)
     product_slug = fields.Char('Product Slug', readonly=True)
     line_total = fields.Float('Line Total', readonly=True)
@@ -612,7 +746,8 @@ class MysdbOrderReport(models.Model):
                     COALESCE(o.order_code, 'N/A') as order_code,
                     CAST(o.order_created_at AS TIMESTAMP) as order_created_at,
                     COALESCE(o.customer_name, 'Unknown') as customer_name,
-                    COALESCE(d.product_name, 'No Product') as product_name,
+                    COALESCE(p.product_name, d.product_name, 'No Product') as product_name,
+                    COALESCE(d.product_id, d.product_sku) as product_id_char,
                     d.product_sku as product_sku,
                     p.product_slug as product_slug,
                     COALESCE(d.total, 0.0) as line_total,
@@ -629,44 +764,18 @@ class MysdbOrderReport(models.Model):
                     COALESCE(macc.name_ar, 'No Account') as marketing_account_name_ar
                 FROM mysdb_order_detail d
                 LEFT JOIN mysdb_order o ON d.order_linked_id = o.order_id
-                LEFT JOIN mysdb_product p ON (d.product_sku = p.product_sku AND d.store_id = p.store_id)
+                    AND (d.store_id = o.store_id OR d.store_id IS NULL OR o.store_id IS NULL)
+                LEFT JOIN mysdb_product p
+                    ON (d.store_id = p.store_id OR d.store_id IS NULL OR p.store_id IS NULL)
+                    AND (
+                        (d.product_id IS NOT NULL AND d.product_id = p.product_id)
+                        OR (d.product_id IS NULL AND d.product_sku IS NOT NULL AND d.product_sku = p.product_sku)
+                    )
                 LEFT JOIN mysdb_product_relation pr ON p.id = pr.product_id
-                LEFT JOIN mysdb_project proj ON pr.project_id = proj.id
-                LEFT JOIN mysdb_section sect ON proj.section_id = sect.id
+                LEFT JOIN mysdb_section sect ON pr.section_id = sect.id
+                LEFT JOIN mysdb_project proj ON sect.project_id = proj.id
                 LEFT JOIN mysdb_product_marketing_relation pmr ON p.id = pmr.product_id
                 LEFT JOIN mysdb_marketing_account macc ON pmr.account_id = macc.id
-
-                UNION ALL
-
-                -- 2. Adjustment Lines (Shipping, VAT, Fees)
-                -- We use a negative ID range to avoid conflict with detail IDs
-                SELECT 
-                    (o.id * -1) as id,
-                    COALESCE(o.order_code, 'N/A') as order_code,
-                    CAST(o.order_created_at AS TIMESTAMP) as order_created_at,
-                    COALESCE(o.customer_name, 'Unknown') as customer_name,
-                    'Adjustments (Shipping/Tax/Fees)' as product_name,
-                    'ADJ' as product_sku,
-                    'adjustment' as product_slug,
-                    (o.order_total - COALESCE(lines.total_sum, 0.0)) as line_total,
-                    o.order_total as order_total,
-                    COALESCE(o.payment_status, 'Unknown') as payment_status,
-                    COALESCE(o.store_name, 'Unknown') as store_name,
-                    'Adjustments' as project_name_ar,
-                    'Adjustments' as section_name_ar,
-                    o.transaction_reference as transaction_reference,
-                    o.payment_method_name as payment_method_name,
-                    o.source as source,
-                    'ADJ-' || o.order_id as order_detail_uuid,
-                    '' as invoice_link,
-                    'N/A' as marketing_account_name_ar
-                FROM mysdb_order o
-                LEFT JOIN (
-                    SELECT order_linked_id, SUM(total) as total_sum 
-                    FROM mysdb_order_detail 
-                    GROUP BY order_linked_id
-                ) lines ON o.order_id = lines.order_linked_id
-                WHERE (o.order_total - COALESCE(lines.total_sum, 0.0)) != 0
             )
         """)
 
@@ -714,7 +823,13 @@ class MysdbProjectIncomeReport(models.Model):
                         COUNT(DISTINCT p.id) as product_count
                     FROM mysdb_order o
                     JOIN mysdb_order_detail d ON o.order_id = d.order_linked_id
-                    JOIN mysdb_product p ON d.product_sku = p.product_sku AND d.store_id = p.store_id
+                        AND (o.store_id = d.store_id OR d.store_id IS NULL OR o.store_id IS NULL)
+                    JOIN mysdb_product p
+                        ON (d.store_id = p.store_id OR d.store_id IS NULL OR p.store_id IS NULL)
+                        AND (
+                            (d.product_id IS NOT NULL AND d.product_id = p.product_id)
+                            OR (d.product_id IS NULL AND d.product_sku IS NOT NULL AND d.product_sku = p.product_sku)
+                        )
                     JOIN mysdb_product_relation pr ON p.id = pr.product_id
                     WHERE o.payment_status = 'paid'
                     GROUP BY pr.project_id, TO_CHAR(o.order_created_at, 'YYYYMM')
@@ -754,7 +869,12 @@ class MysdbProjectIncomeReport(models.Model):
                         ELSE 0.0
                     END as roi
                 FROM mysdb_project proj
-                LEFT JOIN mysdb_section sect ON proj.section_id = sect.id
+                LEFT JOIN (
+                    SELECT project_id, MIN(section_name_ar) as section_name_ar
+                    FROM mysdb_section
+                    WHERE project_id IS NOT NULL
+                    GROUP BY project_id
+                ) sect ON sect.project_id = proj.id
                 LEFT JOIN mysdb_store st ON proj.store_id = st.id
                 CROSS JOIN (
                     SELECT DISTINCT period FROM order_income
@@ -805,7 +925,13 @@ class MysdbMarketingIncomeReport(models.Model):
                         COUNT(DISTINCT p.id) as product_count
                     FROM mysdb_order o
                     JOIN mysdb_order_detail d ON o.order_id = d.order_linked_id
-                    JOIN mysdb_product p ON d.product_sku = p.product_sku AND d.store_id = p.store_id
+                        AND (o.store_id = d.store_id OR d.store_id IS NULL OR o.store_id IS NULL)
+                    JOIN mysdb_product p
+                        ON (d.store_id = p.store_id OR d.store_id IS NULL OR p.store_id IS NULL)
+                        AND (
+                            (d.product_id IS NOT NULL AND d.product_id = p.product_id)
+                            OR (d.product_id IS NULL AND d.product_sku IS NOT NULL AND d.product_sku = p.product_sku)
+                        )
                     JOIN mysdb_product_marketing_relation pmr ON p.id = pmr.product_id
                     WHERE o.payment_status = 'paid'
                     GROUP BY pmr.account_id, TO_CHAR(o.order_created_at, 'YYYYMM')
@@ -863,6 +989,7 @@ class MysdbDataAudit(models.Model):
     _auto = False
 
     issue_type = fields.Selection([
+        ('orphan_detail', 'Orphan Order Detail (No Parent Order)'),
         ('missing_product', 'Product Missing from Catalog'),
         ('no_project', 'No Project Assigned'),
         ('no_marketing', 'No Marketing Account Assigned'),
@@ -889,11 +1016,38 @@ class MysdbDataAudit(models.Model):
         self.env.cr.execute("DROP VIEW IF EXISTS mysdb_data_audit")
         self.env.cr.execute("""
             CREATE OR REPLACE VIEW mysdb_data_audit AS (
-                -- 1. Products in Order Details but NOT in Product Table
+                -- 0. Orphan Order Details: details whose order_linked_id has no match in mysdb_order
                 SELECT 
                     ROW_NUMBER() OVER (ORDER BY COALESCE(SUM(d.total), 0) DESC) as id,
+                    'orphan_detail' as issue_type,
+                    COALESCE(d.product_id, d.product_sku, 'N/A') as product_sku,
+                    d.product_name,
+                    d.store_id,
+                    d.order_linked_id as last_seen_order,
+                    NULL::integer as product_id_int,
+                    COALESCE(SUM(d.total), 0.0) as total_order_value,
+                    COUNT(d.id)::integer as order_count,
+                    CASE 
+                        WHEN MAX(d.created_at) >= NOW() - INTERVAL '30 days' THEN 'high'
+                        WHEN MAX(d.created_at) >= NOW() - INTERVAL '90 days' THEN 'medium'
+                        ELSE 'low'
+                    END as priority
+                FROM mysdb_order_detail d
+                LEFT JOIN mysdb_order o
+                    ON d.order_linked_id = o.order_id
+                    AND (d.store_id = o.store_id OR d.store_id IS NULL OR o.store_id IS NULL)
+                WHERE d.order_linked_id IS NOT NULL
+                  AND o.id IS NULL
+                GROUP BY d.order_linked_id, COALESCE(d.product_id, d.product_sku, 'N/A'), d.product_name, d.store_id
+
+                UNION ALL
+
+                -- 1. Order details where no matching product exists in mysdb_product
+                --    (matched via product_id or product_sku + store_id)
+                SELECT 
+                    (ROW_NUMBER() OVER (ORDER BY COALESCE(SUM(d.total), 0) DESC) + 500000) as id,
                     'missing_product' as issue_type,
-                    d.product_sku,
+                    COALESCE(d.product_id, d.product_sku, 'N/A') as product_sku,
                     d.product_name,
                     d.store_id,
                     COALESCE(MAX(o.order_code), 'N/A') as last_seen_order,
@@ -906,10 +1060,16 @@ class MysdbDataAudit(models.Model):
                         ELSE 'low'
                     END as priority
                 FROM mysdb_order_detail d
+                LEFT JOIN mysdb_product p
+                    ON (d.store_id = p.store_id OR d.store_id IS NULL OR p.store_id IS NULL)
+                    AND (
+                        (d.product_id IS NOT NULL AND d.product_id = p.product_id)
+                        OR (d.product_id IS NULL AND d.product_sku IS NOT NULL AND d.product_sku = p.product_sku)
+                    )
                 LEFT JOIN mysdb_order o ON d.order_linked_id = o.order_id
-                WHERE d.product_sku NOT IN (SELECT product_sku FROM mysdb_product WHERE product_sku IS NOT NULL)
-                  AND d.product_sku IS NOT NULL
-                GROUP BY d.product_sku, d.product_name, d.store_id
+                    AND (d.store_id = o.store_id OR d.store_id IS NULL OR o.store_id IS NULL)
+                WHERE p.id IS NULL
+                GROUP BY COALESCE(d.product_id, d.product_sku, 'N/A'), d.product_name, d.store_id
 
                 UNION ALL
 
@@ -917,7 +1077,7 @@ class MysdbDataAudit(models.Model):
                 SELECT 
                     (ROW_NUMBER() OVER (ORDER BY COALESCE(SUM(d.total), 0) DESC) + 1000000) as id,
                     'no_project' as issue_type,
-                    p.product_sku,
+                    COALESCE(p.product_id, p.product_sku, 'N/A') as product_sku,
                     p.product_name,
                     p.store_id,
                     COALESCE(MAX(o.order_code), 'N/A') as last_seen_order,
@@ -931,10 +1091,16 @@ class MysdbDataAudit(models.Model):
                         ELSE 'low'
                     END as priority
                 FROM mysdb_product p
-                LEFT JOIN mysdb_order_detail d ON p.product_sku = d.product_sku AND p.store_id = d.store_id
+                LEFT JOIN mysdb_order_detail d
+                    ON (d.store_id = p.store_id OR d.store_id IS NULL OR p.store_id IS NULL)
+                    AND (
+                        (d.product_id IS NOT NULL AND d.product_id = p.product_id)
+                        OR (d.product_id IS NULL AND d.product_sku IS NOT NULL AND d.product_sku = p.product_sku)
+                    )
                 LEFT JOIN mysdb_order o ON d.order_linked_id = o.order_id
+                    AND (d.store_id = o.store_id OR d.store_id IS NULL OR o.store_id IS NULL)
                 WHERE p.id NOT IN (SELECT product_id FROM mysdb_product_relation WHERE product_id IS NOT NULL)
-                GROUP BY p.id, p.product_sku, p.product_name, p.store_id
+                GROUP BY p.id, p.product_id, p.product_sku, p.product_name, p.store_id
 
                 UNION ALL
 
@@ -942,7 +1108,7 @@ class MysdbDataAudit(models.Model):
                 SELECT 
                     (ROW_NUMBER() OVER (ORDER BY COALESCE(SUM(d.total), 0) DESC) + 2000000) as id,
                     'no_marketing' as issue_type,
-                    p.product_sku,
+                    COALESCE(p.product_id, p.product_sku, 'N/A') as product_sku,
                     p.product_name,
                     p.store_id,
                     COALESCE(MAX(o.order_code), 'N/A') as last_seen_order,
@@ -956,10 +1122,16 @@ class MysdbDataAudit(models.Model):
                         ELSE 'low'
                     END as priority
                 FROM mysdb_product p
-                LEFT JOIN mysdb_order_detail d ON p.product_sku = d.product_sku AND p.store_id = d.store_id
+                LEFT JOIN mysdb_order_detail d
+                    ON (d.store_id = p.store_id OR d.store_id IS NULL OR p.store_id IS NULL)
+                    AND (
+                        (d.product_id IS NOT NULL AND d.product_id = p.product_id)
+                        OR (d.product_id IS NULL AND d.product_sku IS NOT NULL AND d.product_sku = p.product_sku)
+                    )
                 LEFT JOIN mysdb_order o ON d.order_linked_id = o.order_id
+                    AND (d.store_id = o.store_id OR d.store_id IS NULL OR o.store_id IS NULL)
                 WHERE p.id NOT IN (SELECT product_id FROM mysdb_product_marketing_relation WHERE product_id IS NOT NULL)
-                GROUP BY p.id, p.product_sku, p.product_name, p.store_id
+                GROUP BY p.id, p.product_id, p.product_sku, p.product_name, p.store_id
                 
                 UNION ALL
                 
@@ -967,7 +1139,7 @@ class MysdbDataAudit(models.Model):
                 SELECT 
                     (ROW_NUMBER() OVER (ORDER BY COALESCE(SUM(d.total), 0) DESC) + 3000000) as id,
                     'incomplete_assignment' as issue_type,
-                    p.product_sku,
+                    COALESCE(p.product_id, p.product_sku, 'N/A') as product_sku,
                     p.product_name,
                     p.store_id,
                     COALESCE(MAX(o.order_code), 'N/A') as last_seen_order,
@@ -981,8 +1153,14 @@ class MysdbDataAudit(models.Model):
                         ELSE 'low'
                     END as priority
                 FROM mysdb_product p
-                LEFT JOIN mysdb_order_detail d ON p.product_sku = d.product_sku AND p.store_id = d.store_id
+                LEFT JOIN mysdb_order_detail d
+                    ON (d.store_id = p.store_id OR d.store_id IS NULL OR p.store_id IS NULL)
+                    AND (
+                        (d.product_id IS NOT NULL AND d.product_id = p.product_id)
+                        OR (d.product_id IS NULL AND d.product_sku IS NOT NULL AND d.product_sku = p.product_sku)
+                    )
                 LEFT JOIN mysdb_order o ON d.order_linked_id = o.order_id
+                    AND (d.store_id = o.store_id OR d.store_id IS NULL OR o.store_id IS NULL)
                 WHERE (
                     (p.id IN (SELECT product_id FROM mysdb_product_relation WHERE product_id IS NOT NULL) 
                      AND p.id NOT IN (SELECT product_id FROM mysdb_product_marketing_relation WHERE product_id IS NOT NULL))
@@ -990,31 +1168,94 @@ class MysdbDataAudit(models.Model):
                     (p.id NOT IN (SELECT product_id FROM mysdb_product_relation WHERE product_id IS NOT NULL) 
                      AND p.id IN (SELECT product_id FROM mysdb_product_marketing_relation WHERE product_id IS NOT NULL))
                 )
-                GROUP BY p.id, p.product_sku, p.product_name, p.store_id
+                GROUP BY p.id, p.product_id, p.product_sku, p.product_name, p.store_id
             )
         """)
 
+class MysdbDuplicateOrderDetail(models.Model):
+    _name = 'mysdb.duplicate.order.detail'
+    _description = 'Duplicate Order Details in Report'
+    _auto = False
+    _order = 'duplicate_count desc'
+
+    order_id = fields.Char('Order ID', readonly=True)
+    store_id = fields.Char('Store ID', readonly=True)
+    duplicate_count = fields.Integer('Duplicate Orders', readonly=True,
+                                      help="Number of duplicate order records for this order_id+store_id")
+    detail_count = fields.Integer('Affected Details', readonly=True,
+                                   help="Number of order detail lines affected by these duplicate orders")
+    extra_report_rows = fields.Integer('Extra Report Rows', readonly=True,
+                                        help="Number of extra rows generated in the report")
+    customer_names = fields.Char('Customer Names', readonly=True,
+                                  help="Distinct customer names from duplicate orders")
+    order_total = fields.Float('Order Total', readonly=True)
+    payment_status = fields.Char('Payment Status', readonly=True)
+    store_name = fields.Char('Store Name', readonly=True)
+
+    def init(self):
+        self.env.cr.execute("DROP VIEW IF EXISTS mysdb_duplicate_order_detail")
+        self.env.cr.execute("""
+            CREATE OR REPLACE VIEW mysdb_duplicate_order_detail AS (
+                SELECT 
+                    ROW_NUMBER() OVER (ORDER BY dup_orders.dup_count DESC, dup_orders.order_id) as id,
+                    dup_orders.order_id,
+                    dup_orders.store_id,
+                    dup_orders.dup_count as duplicate_count,
+                    COALESCE(detail_stats.detail_count, 0)::integer as detail_count,
+                    (COALESCE(detail_stats.detail_count, 0) * (dup_orders.dup_count - 1))::integer as extra_report_rows,
+                    dup_orders.customer_names,
+                    dup_orders.order_total,
+                    dup_orders.payment_status,
+                    dup_orders.store_name
+                FROM (
+                    SELECT 
+                        o.order_id,
+                        o.store_id,
+                        COUNT(*)::integer as dup_count,
+                        STRING_AGG(DISTINCT COALESCE(o.customer_name, 'Unknown'), ', ') as customer_names,
+                        MAX(o.order_total) as order_total,
+                        MAX(o.payment_status) as payment_status,
+                        MAX(o.store_name) as store_name
+                    FROM mysdb_order o
+                    GROUP BY o.order_id, o.store_id
+                    HAVING COUNT(*) > 1
+                ) dup_orders
+                LEFT JOIN (
+                    SELECT 
+                        d.order_linked_id,
+                        d.store_id,
+                        COUNT(*)::integer as detail_count
+                    FROM mysdb_order_detail d
+                    GROUP BY d.order_linked_id, d.store_id
+                ) detail_stats 
+                    ON dup_orders.order_id = detail_stats.order_linked_id
+                    AND (dup_orders.store_id = detail_stats.store_id 
+                         OR dup_orders.store_id IS NULL OR detail_stats.store_id IS NULL)
+            )
+        """)
+
+
 class MysdbBulkAssignProjectWizard(models.TransientModel):
     _name = 'mysdb.bulk.assign.project.wizard'
-    _description = 'Bulk Assign Products to Project'
+    _description = 'Bulk Assign Products to Section'
 
-    project_id = fields.Many2one('mysdb.project', string='Target Project', required=True,
-                                  help="All selected products will be assigned to this project")
+    section_id = fields.Many2one('mysdb.section', string='Target Section', required=True,
+                                  help="All selected products will be assigned to this section")
     product_ids = fields.Many2many('mysdb.product', string='Products to Assign',
-                                     help="Select products to assign to the project")
+                                     help="Select products to assign to the section")
     store_id = fields.Many2one('mysdb.store', string='Filter by Store',
                                 help="Filter products by store for easier selection")
     assignment_filter = fields.Selection([
         ('all', 'All Products'),
-        ('unassigned', 'Products Without Project'),
+        ('unassigned', 'Products Without Section'),
         ('incomplete', 'Products Without Complete Assignment')
     ], string='Filter Products', default='unassigned',
        help="Filter which products to show for selection")
     
-    replace_existing = fields.Boolean('Replace Existing Project Assignment', default=False,
-                                       help="If checked, will replace existing project assignment. Otherwise, skip products with existing project.")
+    replace_existing = fields.Boolean('Replace Existing Section Assignment', default=False,
+                                      help="If checked, will replace existing section assignment. Otherwise, skip products with existing section.")
     
-    preview_count = fields.Integer('Products to Assign', compute='_compute_preview_count')
+    preview_count = fields.Integer('Products Selected', compute='_compute_preview_count')
     
     @api.depends('product_ids')
     def _compute_preview_count(self):
@@ -1067,42 +1308,59 @@ class MysdbBulkAssignProjectWizard(models.TransientModel):
         return result
     
     def action_assign(self):
-        """Execute bulk assignment"""
+        """Execute bulk assignment — batched for performance."""
         self.ensure_one()
         
         if not self.product_ids:
             raise ValidationError("Please select at least one product to assign.")
         
-        # Validate store match
-        project_store = self.project_id.store_id.store_code
-        for product in self.product_ids:
-            if product.store_id != project_store:
+        # Validate store match (if project is linked to the section)
+        project_store = False
+        if self.section_id.project_id and self.section_id.project_id.store_id:
+            project_store = self.section_id.project_id.store_id.store_code
+        if project_store:
+            mismatched = self.product_ids.filtered(lambda p: p.store_id != project_store)
+            if mismatched:
+                product = mismatched[0]
                 raise ValidationError(
                     f"Store Mismatch!\n\n"
                     f"Product '{product.display_name}' belongs to Store: {product.store_id}\n"
-                    f"Project '{self.project_id.display_name}' belongs to Store: {project_store}\n\n"
+                    f"Project '{self.section_id.project_id.display_name}' belongs to Store: {project_store}\n\n"
                     f"Please ensure all products belong to the same store as the project."
                 )
         
-        created_count = 0
+        # ── Batch: fetch ALL existing relations for the selected products in one query
+        product_ids_list = self.product_ids.ids
+        Relation = self.env['mysdb.product_relation']
+        existing_rels = Relation.search([('product_id', 'in', product_ids_list)])
+        existing_map = {rel.product_id.id: rel for rel in existing_rels}
+
+        to_create = []
         updated_count = 0
         skipped_count = 0
-        
+        to_update = Relation.browse()
+
         for product in self.product_ids:
-            existing = self.env['mysdb.product_relation'].search([('product_id', '=', product.id)])
-            
+            existing = existing_map.get(product.id)
             if existing:
                 if self.replace_existing:
-                    existing.write({'project_id': self.project_id.id})
+                    to_update |= existing
                     updated_count += 1
                 else:
                     skipped_count += 1
             else:
-                self.env['mysdb.product_relation'].create({
+                to_create.append({
                     'product_id': product.id,
-                    'project_id': self.project_id.id
+                    'section_id': self.section_id.id,
                 })
-                created_count += 1
+
+        # Single batch write + batch create
+        if to_update:
+            to_update.write({'section_id': self.section_id.id})
+        created_count = 0
+        if to_create:
+            Relation.create(to_create)
+            created_count = len(to_create)
         
         message = f"Assignment Complete!\n\n"
         message += f"Created: {created_count}\n"
@@ -1137,7 +1395,7 @@ class MysdbBulkAssignMarketingWizard(models.TransientModel):
     ], string='Filter Products', default='unassigned',
        help="Filter which products to show for selection")
     
-    preview_count = fields.Integer('Products to Assign', compute='_compute_preview_count')
+    preview_count = fields.Integer('Products Selected', compute='_compute_preview_count')
     
     @api.depends('product_ids')
     def _compute_preview_count(self):
@@ -1190,30 +1448,35 @@ class MysdbBulkAssignMarketingWizard(models.TransientModel):
         return result
     
     def action_assign(self):
-        """Execute bulk assignment"""
+        """Execute bulk assignment — batched for performance."""
         self.ensure_one()
         
         if not self.product_ids:
             raise ValidationError("Please select at least one product to assign.")
         
-        created_count = 0
-        skipped_count = 0
-        
+        # ── Batch: fetch ALL existing relations for this account + selected products in one query
+        product_ids_list = self.product_ids.ids
+        MktRelation = self.env['mysdb.product_marketing_relation']
+        existing_rels = MktRelation.search([
+            ('product_id', 'in', product_ids_list),
+            ('account_id', '=', self.account_id.id),
+        ])
+        already_assigned = set(existing_rels.mapped('product_id').ids)
+
+        to_create = []
         for product in self.product_ids:
-            # Check if this product-account combination already exists
-            existing = self.env['mysdb.product_marketing_relation'].search([
-                ('product_id', '=', product.id),
-                ('account_id', '=', self.account_id.id)
-            ])
-            
-            if not existing:
-                self.env['mysdb.product_marketing_relation'].create({
+            if product.id not in already_assigned:
+                to_create.append({
                     'product_id': product.id,
-                    'account_id': self.account_id.id
+                    'account_id': self.account_id.id,
                 })
-                created_count += 1
-            else:
-                skipped_count += 1
+
+        # Single batch create
+        created_count = 0
+        if to_create:
+            MktRelation.create(to_create)
+            created_count = len(to_create)
+        skipped_count = len(already_assigned)
         
         message = f"Assignment Complete!\n\n"
         message += f"Created: {created_count}\n"
@@ -1281,7 +1544,8 @@ class MysdbBulkPeriodCreationWizard(models.TransientModel):
     
     cost_percentage = fields.Float('Cost %', default=20.0,
                                    help="Cost as percentage of target (e.g., 20 = 20% of target)")
-    cost_amount = fields.Float('Cost Amount', compute='_compute_cost_amount', store=True, readonly=False)
+    cost_amount = fields.Float('Cost Amount', compute='_compute_cost_amount',
+                               inverse='_inverse_cost_amount', store=True, readonly=False)
     
     # Distribution
     distribution_type = fields.Selection([
@@ -1307,7 +1571,14 @@ class MysdbBulkPeriodCreationWizard(models.TransientModel):
         for wizard in self:
             if wizard.cost_calculation_type == 'percentage':
                 wizard.cost_amount = wizard.target_amount * (wizard.cost_percentage / 100.0)
-            # If manual, user enters directly
+            elif wizard.cost_amount is False:
+                wizard.cost_amount = 0.0
+
+    def _inverse_cost_amount(self):
+        # Manual entry is stored directly; no action needed for percentage mode.
+        for wizard in self:
+            if wizard.cost_calculation_type == 'percentage':
+                wizard.cost_amount = wizard.target_amount * (wizard.cost_percentage / 100.0)
     
     @api.depends('create_yearly', 'create_monthly', 'select_specific_months',
                  'month_01', 'month_02', 'month_03', 'month_04', 'month_05', 'month_06',

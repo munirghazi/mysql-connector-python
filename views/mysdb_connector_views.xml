@@ -8,6 +8,9 @@
                 <header>
                     <button name="action_sync_table" type="object" string="Sync Table"
                             class="oe_highlight" invisible="state == 'draft'"/>
+                    <button name="action_clear_sync_lock" type="object" string="Clear Sync Lock"
+                            class="btn-secondary" invisible="sync_in_progress == False"
+                            confirm="This will clear the sync lock. Continue?"/>
                     <button name="action_fetch_data" type="object" string="Fetch Data"
                             class="oe_highlight"/>
                     <button name="action_download_csv" type="object" string="Download CSV"
@@ -16,6 +19,9 @@
                             class="btn-secondary" invisible="state == 'draft'"/>
                     <button name="action_reset_connector" type="object" string="Reset Connector"
                             class="btn-danger" invisible="state == 'draft'" confirm="Are you sure you want to clear the sync logs for this table?"/>
+                    <button name="action_clear_imported_data" type="object" string="Clear Sync Log"
+                            class="btn-warning" invisible="state == 'draft'"
+                            confirm="This will delete all sync tracking entries for this connector. Next sync will treat all records as new. Continue?"/>
                     <field name="state" widget="statusbar" statusbar_visible="draft,fetched,sync"/>
                 </header>
                 <sheet>
@@ -23,12 +29,15 @@
                         <group string="Connection Details">
                             <field name="name"/>
                             <field name="credential_id" options="{'no_create': True}"/>
+                            <field name="company_id" options="{'no_create': True}" groups="base.group_multi_company"/>
                         </group>
                         <group string="Target Mapping">
                             <field name="sql_table"/>
                             <field name="model_id" options="{'no_create': True}"/>
                             <field name="auto_sync" widget="boolean_toggle"/>
                             <field name="is_fetched" invisible="True"/>
+                            <field name="sync_in_progress" invisible="True"/>
+                            <field name="sync_started_at" invisible="True"/>
                         </group>
                     </group>
                     <group string="Import Filtering">
@@ -42,10 +51,15 @@
                     </group>
                     <notebook invisible="is_fetched == False" >
                         <page string="Data Mapping">
-                            <field name="sync_ids">
+                            <field name="sync_ids" context="{'default_connection_id': id}">
                                 <tree create="false" editable="bottom">
-                                    <field name="mysql_field" readonly="1" string="MySDB Field"/>
                                     <field name="ir_field_id" options="{'no_create': True}"  />
+                                    <field name="mapping_mode"/>
+                                    <field name="connection_id" column_invisible="True"/>
+                                    <field name="mysql_field_id" string="MySQL Field"
+                                           invisible="mapping_mode != 'mysql'"/>
+                                    <field name="constant_value" invisible="mapping_mode != 'constant'"/>
+                                    <field name="formula_expression" invisible="mapping_mode != 'formula'"/>
                                     <field name="ref_table" readonly="1"/>
                                     <field name="ref_col" readonly="1"/>
                                     <field name="ref_col_name" required="ref_col != False"/>
@@ -81,6 +95,44 @@
     <record id="mysdb_connector_action" model="ir.actions.act_window">
         <field name="name">Connector</field>
         <field name="res_model">mysdb.connector</field>
+        <field name="view_mode">tree,form</field>
+    </record>
+    <!-- Sync Status -->
+    <record id="view_mysdb_sync_status_tree" model="ir.ui.view">
+        <field name="name">mysdb.sync.status.tree</field>
+        <field name="model">mysdb.sync.status</field>
+        <field name="arch" type="xml">
+            <tree>
+                <field name="source_type"/>
+                <field name="source_name"/>
+                <field name="sync_datetime"/>
+                <field name="sync_status"/>
+                <field name="sync_message"/>
+            </tree>
+        </field>
+    </record>
+    <record id="action_mysdb_sync_status" model="ir.actions.act_window">
+        <field name="name">Sync Status</field>
+        <field name="res_model">mysdb.sync.status</field>
+        <field name="view_mode">tree</field>
+    </record>
+    <!-- Sync Log -->
+    <record id="view_mysdb_sync_log_tree" model="ir.ui.view">
+        <field name="name">mysdb.sync.log.tree</field>
+        <field name="model">mysdb.sync.log</field>
+        <field name="arch" type="xml">
+            <tree>
+                <field name="source_type"/>
+                <field name="source_name"/>
+                <field name="sync_datetime"/>
+                <field name="sync_status"/>
+                <field name="sync_message"/>
+            </tree>
+        </field>
+    </record>
+    <record id="action_mysdb_sync_log" model="ir.actions.act_window">
+        <field name="name">Sync Log</field>
+        <field name="res_model">mysdb.sync.log</field>
         <field name="view_mode">tree,form</field>
     </record>
     <!--    mysdb connector menu - Moved to mysdb_menus.xml to avoid forward reference -->

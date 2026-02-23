@@ -1,3 +1,11 @@
 id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
-access_mysdb_bulk_period_creation_wizard_user,mysdb.bulk.period.creation.wizard.user,model_mysdb_bulk_period_creation_wizard,base.group_user,1,1,1,1
-
+access_mysdb_bulk_period_creation_wizard_user,mysdb.bulk.period.creation.wizard.user,model_mysdb_bulk_period_creation_wizard,my_sdb_reporting.group_mysdb_user,1,1,1,1
+access_mysdb_api_source_system,mysdb.api.source.system,model_mysdb_api_source,base.group_system,1,1,1,1
+access_mysdb_sheet_source_system,mysdb.sheet.source.system,model_mysdb_sheet_source,base.group_system,1,1,1,1
+access_mysdb_sheet_row_system,mysdb.sheet.row.system,model_mysdb_sheet_row,base.group_system,1,1,1,1
+access_mysdb_affiliate_user,mysdb.affiliate.user,model_mysdb_affiliate,my_sdb_reporting.group_mysdb_user,1,0,0,0
+access_mysdb_affiliate_manager,mysdb.affiliate.manager,model_mysdb_affiliate,my_sdb_reporting.group_mysdb_manager,1,1,1,1
+access_mysdb_order_detail_link_product_wizard_system,mysdb.order.detail.link.product.wizard.system,model_mysdb_order_detail_link_product_wizard,base.group_system,1,1,1,1
+access_mysdb_mysql_column_system,mysdb.mysql.column.system,model_mysdb_mysql_column,base.group_system,1,1,1,1
+access_mysdb_sync_status_system,mysdb.sync.status.system,model_mysdb_sync_status,base.group_system,1,0,0,0
+access_mysdb_sync_log_system,mysdb.sync.log.system,model_mysdb_sync_log,base.group_system,1,0,0,0

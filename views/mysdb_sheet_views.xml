@@ -1,0 +1,187 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<odoo>
+    <record id="view_mysdb_sheet_source_tree" model="ir.ui.view">
+        <field name="name">mysdb.sheet.source.tree</field>
+        <field name="model">mysdb.sheet.source</field>
+        <field name="arch" type="xml">
+            <tree string="Sheet Sources">
+                <field name="name"/>
+                <field name="spreadsheet_id"/>
+                <field name="worksheet_gid"/>
+                <field name="active"/>
+                <field name="last_sync_at"/>
+                <field name="last_sync_status"/>
+                <field name="last_sync_count"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="view_mysdb_sheet_source_form" model="ir.ui.view">
+        <field name="name">mysdb.sheet.source.form</field>
+        <field name="model">mysdb.sheet.source</field>
+        <field name="arch" type="xml">
+            <form string="Sheet Source">
+                <header>
+                    <button name="action_fetch_columns" type="object" string="Fetch Columns" class="btn-secondary"/>
+                    <button name="action_sync" type="object" string="Sync Now" class="btn-primary"/>
+                </header>
+                <sheet>
+                    <group>
+                        <field name="name"/>
+                        <field name="active"/>
+                        <field name="auto_sync" widget="boolean_toggle"/>
+                        <field name="company_id" options="{'no_create': True}" groups="base.group_multi_company"/>
+                    </group>
+                    <group string="Connection">
+                        <field name="spreadsheet_id"/>
+                        <field name="worksheet_gid"/>
+                        <field name="worksheet_name"/>
+                        <field name="auth_type"/>
+                        <field name="service_account_json" invisible="auth_type != 'service'"/>
+                        <field name="service_account_scopes" invisible="auth_type != 'service'"/>
+                    </group>
+                    <group string="Target Model" invisible="not sync_to_model">
+                        <field name="sync_to_model"/>
+                        <field name="target_model_id" required="sync_to_model"/>
+                        <field name="unique_field"/>
+                        <field name="mapping_json" widget="text"
+                               placeholder="{'product_id':'Project ID','store_id':{'const':'123'}}"/>
+                    </group>
+                    <group string="Target Model">
+                        <field name="sync_to_model"/>
+                    </group>
+                    <group string="Sync Options">
+                        <field name="delete_missing_rows"/>
+                    </group>
+                    <notebook>
+                        <page string="Column Mapping">
+                            <group col="4">
+                                <field name="tag_01"/><field name="type_01"/>
+                                <field name="tag_02"/><field name="type_02"/>
+                                <field name="tag_03"/><field name="type_03"/>
+                                <field name="tag_04"/><field name="type_04"/>
+                                <field name="tag_05"/><field name="type_05"/>
+                                <field name="tag_06"/><field name="type_06"/>
+                                <field name="tag_07"/><field name="type_07"/>
+                                <field name="tag_08"/><field name="type_08"/>
+                                <field name="tag_09"/><field name="type_09"/>
+                                <field name="tag_10"/><field name="type_10"/>
+                                <field name="tag_11"/><field name="type_11"/>
+                                <field name="tag_12"/><field name="type_12"/>
+                                <field name="tag_13"/><field name="type_13"/>
+                                <field name="tag_14"/><field name="type_14"/>
+                                <field name="tag_15"/><field name="type_15"/>
+                                <field name="tag_16"/><field name="type_16"/>
+                                <field name="tag_17"/><field name="type_17"/>
+                                <field name="tag_18"/><field name="type_18"/>
+                                <field name="tag_19"/><field name="type_19"/>
+                                <field name="tag_20"/><field name="type_20"/>
+                                <field name="tag_21"/><field name="type_21"/>
+                                <field name="tag_22"/><field name="type_22"/>
+                                <field name="tag_23"/><field name="type_23"/>
+                                <field name="tag_24"/><field name="type_24"/>
+                                <field name="tag_25"/><field name="type_25"/>
+                            </group>
+                        </page>
+                        <page string="Last Sync">
+                            <group>
+                                <field name="last_sync_at" readonly="1"/>
+                                <field name="last_sync_status" readonly="1"/>
+                                <field name="last_sync_count" readonly="1"/>
+                                <field name="last_sync_message" readonly="1"/>
+                            </group>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_mysdb_sheet_sources" model="ir.actions.act_window">
+        <field name="name">Sheet Sources</field>
+        <field name="res_model">mysdb.sheet.source</field>
+        <field name="view_mode">tree,form</field>
+    </record>
+
+    <record id="view_mysdb_sheet_row_tree" model="ir.ui.view">
+        <field name="name">mysdb.sheet.row.tree</field>
+        <field name="model">mysdb.sheet.row</field>
+        <field name="arch" type="xml">
+            <tree string="Sheet Rows">
+                <header>
+                    <button name="action_sync_source" type="object" string="Sync Source" class="btn-primary"/>
+                </header>
+                <field name="source_id"/>
+                <field name="row_number"/>
+                <field name="col_01"/>
+                <field name="col_02"/>
+                <field name="col_03"/>
+                <field name="col_04"/>
+                <field name="col_05"/>
+                <field name="col_06" optional="hide"/>
+                <field name="col_07" optional="hide"/>
+                <field name="col_08" optional="hide"/>
+                <field name="col_09" optional="hide"/>
+                <field name="col_10" optional="hide"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="view_mysdb_sheet_row_form" model="ir.ui.view">
+        <field name="name">mysdb.sheet.row.form</field>
+        <field name="model">mysdb.sheet.row</field>
+        <field name="arch" type="xml">
+            <form string="Sheet Row">
+                <header>
+                    <button name="action_sync_source" type="object" string="Sync Source" class="btn-primary"/>
+                </header>
+                <sheet>
+                    <group>
+                        <field name="source_id"/>
+                        <field name="row_number"/>
+                    </group>
+                    <group string="Tags (From Source)">
+                        <field name="tag_01"/><field name="tag_02"/>
+                        <field name="tag_03"/><field name="tag_04"/>
+                        <field name="tag_05"/><field name="tag_06"/>
+                        <field name="tag_07"/><field name="tag_08"/>
+                        <field name="tag_09"/><field name="tag_10"/>
+                        <field name="tag_11"/><field name="tag_12"/>
+                        <field name="tag_13"/><field name="tag_14"/>
+                        <field name="tag_15"/><field name="tag_16"/>
+                        <field name="tag_17"/><field name="tag_18"/>
+                        <field name="tag_19"/><field name="tag_20"/>
+                        <field name="tag_21"/><field name="tag_22"/>
+                        <field name="tag_23"/><field name="tag_24"/>
+                        <field name="tag_25"/>
+                    </group>
+                    <group string="Columns">
+                        <field name="col_01"/><field name="col_02"/>
+                        <field name="col_03"/><field name="col_04"/>
+                        <field name="col_05"/><field name="col_06"/>
+                        <field name="col_07"/><field name="col_08"/>
+                        <field name="col_09"/><field name="col_10"/>
+                        <field name="col_11"/><field name="col_12"/>
+                        <field name="col_13"/><field name="col_14"/>
+                        <field name="col_15"/><field name="col_16"/>
+                        <field name="col_17"/><field name="col_18"/>
+                        <field name="col_19"/><field name="col_20"/>
+                        <field name="col_21"/><field name="col_22"/>
+                        <field name="col_23"/><field name="col_24"/>
+                        <field name="col_25"/>
+                    </group>
+                    <group string="Raw">
+                        <field name="raw_json"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_mysdb_sheet_rows" model="ir.actions.act_window">
+        <field name="name">Sheet Rows</field>
+        <field name="res_model">mysdb.sheet.row</field>
+        <field name="view_mode">tree,form</field>
+    </record>
+</odoo>
+

@@ -1,0 +1,53 @@
+========================================================
+REQUEST TO HOSTING PROVIDER - Remote MySQL Access
+========================================================
+
+Dear Support Team,
+
+I need to enable remote MySQL database access from my Odoo ERP server.
+
+CONNECTION DETAILS NEEDED:
+--------------------------
+1. Enable remote MySQL connections for my database
+2. Whitelist IP Address: 31.167.155.172
+3. Confirm MySQL hostname and port
+
+CURRENT SETUP:
+--------------
+Domain: qatra.sa
+Database Name: [Your Database Name]
+MySQL User: [Your MySQL Username]
+Purpose: Connect Odoo ERP system to MySQL database
+
+TECHNICAL REQUIREMENTS:
+-----------------------
+- Allow TCP connections to MySQL port 3306
+- Grant MySQL user permission to connect from IP: 31.167.155.172
+- Provide the correct MySQL server hostname (if different from qatra.sa)
+
+SECURITY NOTES:
+---------------
+- Only this specific IP (31.167.155.172) needs access
+- Connection will use encrypted password
+- This is for legitimate business ERP integration
+
+Please let me know:
+1. If remote MySQL is supported
+2. The correct MySQL hostname to use
+3. Any additional steps needed
+4. Estimated time for activation
+
+Thank you for your assistance.
+
+========================================================
+TESTING AFTER CONFIGURATION:
+========================================================
+
+Once enabled, I will test using:
+Test-NetConnection -ComputerName [mysql_hostname] -Port 3306
+
+Expected result: TcpTestSucceeded = True
+
+========================================================
+
+

@@ -19,8 +19,16 @@
 #    If not, see <http://www.gnu.org/licenses/>.
 #
 ################################################################################
+from . import mysdb_date_utils
 from . import mysdb_data_models
 from . import imported_data
 from . import mysdb_connector
 from . import mysdb_credential
 from . import sync_table
+from . import mysdb_api_source
+from . import mysdb_order_detail_extension
+from . import mysdb_order_detail_link_product_wizard
+from . import mysdb_sync_status
+from . import mysdb_sync_log
+from . import mysdb_sheet_models
+from . import mysdb_affiliate

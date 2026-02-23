@@ -1,0 +1,856 @@
+# -*- coding: utf-8 -*-
+import json
+import threading
+import urllib.request
+import urllib.parse
+import urllib.error
+import logging
+import os
+import re
+from datetime import datetime
+
+import odoo
+from odoo import api, fields, models, _
+from odoo.tools import DEFAULT_SERVER_DATETIME_FORMAT, DEFAULT_SERVER_DATE_FORMAT, config
+from odoo.exceptions import ValidationError
+from .mysdb_date_utils import normalize_datetime as _normalize_dt, normalize_date as _normalize_d
+
+_logger = logging.getLogger(__name__)
+
+
+class MysdbApiSource(models.Model):
+    _name = 'mysdb.api.source'
+    _description = 'MySDB API Source'
+    _rec_name = 'name'
+
+    name = fields.Char(string='Association Name', required=True)
+    api_url = fields.Char(string='API Base URL')
+    request_url = fields.Char(
+        string='Request URL',
+        required=True,
+        help="Full URL or relative path. Supports {page} and {page_size} placeholders."
+    )
+    bearer_token = fields.Text(string='Bearer Token')
+    custom_headers = fields.Text(
+        string='Custom Headers (JSON)',
+        help=(
+            "Optional JSON object of extra HTTP headers sent with every request.\n"
+            "Example: {\"X-Manager-Token\": \"abc123\", \"Accept-Language\": \"ar\"}\n"
+            "These are merged with (and override) the default Authorization header."
+        ),
+    )
+    target_model_id = fields.Many2one(
+        'ir.model',
+        string='Target Model',
+        required=False,
+        domain="[('model', '=ilike', 'mysdb.%')]",
+        ondelete='set null'
+    )
+    unique_field = fields.Char(
+        string='Unique Field',
+        help="Field used to upsert (e.g. order_id, product_id). Leave empty to always create."
+    )
+    data_root_key = fields.Char(
+        string='Data Root Key',
+        help=(
+            "JSON key that contains the list of items.\n"
+            "Leave empty to auto-detect (tries 'data', 'items', 'result', 'results').\n"
+            "Examples: 'orders' for Zid, 'data' for Jood/Bayan."
+        )
+    )
+    mapping_json = fields.Json(
+        string='Field Mapping',
+        help=(
+            "JSON mapping of target_field -> source_key. "
+            "Supports dot-notation for nested fields: "
+            "{'customer_name': 'customer.name', 'payment_method_name': 'payment.method.name'}. "
+            "Constants: {'store_id': {'const': '123'}} or {'store_id': 'const:123'}."
+        )
+    )
+    enable_pagination = fields.Boolean(string='Enable Pagination', default=False)
+    pagination_start = fields.Integer(string='Start Page', default=1)
+    pagination_zero_based = fields.Boolean(string='Zero-based Page Index', default=False)
+    page_size = fields.Integer(string='Page Size', default=50)
+    connect_timeout = fields.Integer(string='Connect Timeout (sec)', default=20)
+    request_timeout = fields.Integer(string='Request Timeout (sec)', default=60)
+    active = fields.Boolean(default=True)
+    company_id = fields.Many2one(
+        'res.company', string='Company',
+        default=lambda self: self.env.company,
+        help='Company that owns this API source. Leave empty for shared access.'
+    )
+    auto_sync = fields.Boolean(
+        string='Auto Sync', default=False,
+        help='If enabled, this API source will be synced automatically by the system scheduler.'
+    )
+
+    filter_date_from = fields.Datetime(string='Filter Date From')
+    filter_date_to = fields.Datetime(string='Filter Date To')
+    filter_date_from_param = fields.Char(string='From Param', default='fromDate')
+    filter_date_to_param = fields.Char(string='To Param', default='toDate')
+    filter_date_format = fields.Char(string='Date Format', default='%Y-%m-%d')
+    filter_status_name_enabled = fields.Boolean(string='Filter by Status Name', default=False)
+    filter_status_name = fields.Char(string='Status Name', default='عملية مقبولة')
+
+    dump_json = fields.Boolean(string='Dump Raw JSON', default=False)
+    dump_directory = fields.Char(string='Dump Directory')
+    dump_file_prefix = fields.Char(string='Dump File Prefix', default='api_dump')
+    last_dump_file = fields.Char(string='Last Dump File', readonly=True)
+    last_dump_size = fields.Integer(string='Last Dump Size (bytes)', readonly=True)
+
+    last_sync_at = fields.Datetime(string='Last Sync At', readonly=True)
+    last_sync_status = fields.Selection(
+        [('ok', 'OK'), ('error', 'Error')],
+        string='Last Sync Status',
+        readonly=True
+    )
+    last_sync_message = fields.Text(string='Last Sync Message', readonly=True)
+    last_sync_count = fields.Integer(string='Last Sync Count', readonly=True)
+    last_sync_page = fields.Integer(string='Last Sync Page', readonly=True)
+    last_sync_page_items = fields.Integer(string='Last Page Items', readonly=True)
+    last_sync_page_created = fields.Integer(string='Last Page Created', readonly=True)
+    last_sync_page_updated = fields.Integer(string='Last Page Updated', readonly=True)
+
+    def _build_request_url(self, page=None):
+        url = (self.request_url or '').strip()
+        if not url:
+            raise ValidationError(_("Request URL is required."))
+        page_val = page if page is not None else self.pagination_start
+        if page_val is None:
+            page_val = 0
+        if self.pagination_zero_based:
+            page_val = int(page_val)
+        else:
+            page_val = int(page_val)
+        if '{page}' in url or '{page_size}' in url:
+            url = url.format(page=page_val, page_size=self.page_size)
+        if not url.lower().startswith(('http://', 'https://')):
+            base = (self.api_url or '').rstrip('/') + '/'
+            url = urllib.parse.urljoin(base, url.lstrip('/'))
+        if self.enable_pagination and '{page}' not in (self.request_url or ''):
+            parsed = urllib.parse.urlparse(url)
+            query = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
+            current_page = str(page_val)
+            current_size = str(self.page_size)
+            # Common pagination params — try to reuse whatever key is
+            # already in the URL; fall back to 'pageNumber' (Jood-style).
+            if 'pageIndex' in query:
+                query['pageIndex'] = current_page
+            elif 'pageNumber' in query:
+                query['pageNumber'] = current_page
+            elif 'page' in query:
+                query['page'] = current_page
+            elif 'pageNo' in query:
+                query['pageNo'] = current_page
+            else:
+                query['pageNumber'] = current_page
+            if 'pageSize' in query:
+                query['pageSize'] = current_size
+            elif 'page_size' in query:
+                query['page_size'] = current_size
+            elif 'limit' in query:
+                query['limit'] = current_size
+            else:
+                query['pageSize'] = current_size
+            url = urllib.parse.urlunparse(parsed._replace(query=urllib.parse.urlencode(query)))
+        if self.filter_date_from or self.filter_date_to:
+            url = self._apply_date_filters(url)
+        return url
+
+    def _apply_date_filters(self, url):
+        parsed = urllib.parse.urlparse(url)
+        query = dict(urllib.parse.parse_qsl(parsed.query, keep_blank_values=True))
+        date_format = self.filter_date_format or '%Y-%m-%d'
+        if self.filter_date_from and self.filter_date_from_param:
+            query[self.filter_date_from_param] = self.filter_date_from.strftime(date_format)
+        if self.filter_date_to and self.filter_date_to_param:
+            query[self.filter_date_to_param] = self.filter_date_to.strftime(date_format)
+        return urllib.parse.urlunparse(parsed._replace(query=urllib.parse.urlencode(query)))
+
+    def _fetch_json(self, url):
+        headers = {
+            'Accept': 'application/json',
+        }
+        if self.bearer_token:
+            headers['Authorization'] = f"Bearer {self.bearer_token.strip()}"
+        # Merge custom headers (can override defaults if needed)
+        if self.custom_headers:
+            try:
+                extra = json.loads(self.custom_headers)
+                if isinstance(extra, dict):
+                    headers.update(extra)
+            except (json.JSONDecodeError, TypeError) as e:
+                _logger.warning("Invalid custom_headers JSON: %s", e)
+        _logger.info(
+            "API fetch: url=%s headers=%s",
+            url,
+            {k: (v[:30] + '…' if len(str(v)) > 30 else v) for k, v in headers.items()},
+        )
+        req = urllib.request.Request(url, headers=headers)
+        timeout = self.request_timeout or self.connect_timeout or 20
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read()
+                status = resp.status
+                content_type = resp.headers.get('Content-Type', '')
+        except urllib.error.HTTPError as exc:
+            try:
+                error_body = exc.read().decode('utf-8', errors='ignore')[:2000]
+            except Exception:
+                error_body = ''
+            raise ValidationError(
+                _("HTTP Error %s: %s\nURL: %s\nResponse: %s") % (
+                    exc.code, exc.reason, url, error_body
+                )
+            )
+        except urllib.error.URLError as exc:
+            raise ValidationError(
+                _("Connection error: %s\nURL: %s") % (str(exc.reason), url)
+            )
+        _logger.info(
+            "API response: status=%s content_type=%s size=%s bytes",
+            status, content_type, len(raw),
+        )
+        if not raw:
+            raise ValidationError(
+                _("Empty response from API.\nURL: %s\nHTTP Status: %s\n"
+                  "Content-Type: %s\nCheck your authentication headers and URL.")
+                % (url, status, content_type)
+            )
+        try:
+            return json.loads(raw.decode('utf-8')), raw
+        except Exception as exc:
+            # Show first 500 chars of response for debugging
+            preview = raw.decode('utf-8', errors='ignore')[:500]
+            raise ValidationError(
+                _("Invalid JSON response: %s\nURL: %s\nResponse preview:\n%s")
+                % (str(exc), url, preview)
+            )
+
+    def _resolve_dotted_key(self, item, dotted_key):
+        """Resolve a dot-notation key path like 'customer.name' or
+        'payment.method.code' against a nested dict."""
+        parts = str(dotted_key).split('.')
+        current = item
+        for part in parts:
+            if isinstance(current, dict):
+                current = current.get(part)
+            else:
+                return None
+        return current
+
+    def _extract_items(self, payload):
+        items = []
+        if isinstance(payload, list):
+            items = payload
+        if isinstance(payload, dict):
+            # If a custom root key is configured, try it first
+            root_key = (self.data_root_key or '').strip()
+            if root_key:
+                val = payload.get(root_key)
+                if isinstance(val, list):
+                    items = val
+                elif val is not None:
+                    _logger.warning(
+                        "API data_root_key '%s' did not contain a list (got %s). "
+                        "Falling back to auto-detect.",
+                        root_key, type(val).__name__,
+                    )
+            if not items:
+                for key in ('data', 'items', 'result', 'results', 'orders', 'products'):
+                    val = payload.get(key)
+                    if isinstance(val, list):
+                        items = val
+                        break
+        if self.filter_status_name_enabled and self.filter_status_name:
+            items = [
+                item for item in items
+                if isinstance(item, dict) and item.get('statusName') == self.filter_status_name
+            ]
+        return items
+
+    def _map_item_to_values(self, item, model_fields):
+        values = {}
+        mapping = self.mapping_json or {}
+        if isinstance(mapping, str):
+            try:
+                mapping = json.loads(mapping)
+            except Exception as exc:
+                raise ValidationError(_("Field Mapping must be valid JSON. %s") % str(exc))
+        if mapping:
+            for target_field, source_key in mapping.items():
+                if target_field not in model_fields:
+                    continue
+                raw_val = None
+                if isinstance(source_key, dict) and 'const' in source_key:
+                    raw_val = source_key.get('const')
+                elif isinstance(source_key, str) and source_key.startswith('const:'):
+                    raw_val = source_key.split('const:', 1)[1]
+                elif isinstance(source_key, str) and '.' in source_key:
+                    # Dot-notation for nested fields: "customer.name"
+                    raw_val = self._resolve_dotted_key(item, source_key)
+                elif source_key in item:
+                    raw_val = item.get(source_key)
+                if raw_val is not None:
+                    values[target_field] = self._coerce_value(target_field, raw_val, model_fields)
+        else:
+            for key, val in item.items():
+                if key in model_fields:
+                    values[key] = self._coerce_value(key, val, model_fields)
+                else:
+                    normalized_key = self._normalize_source_key(key)
+                    if normalized_key in model_fields:
+                        values[normalized_key] = self._coerce_value(normalized_key, val, model_fields)
+        if (
+            self.target_model_id
+            and self.target_model_id.model == 'mysdb.order'
+            and 'order_created_at' in model_fields
+            and 'order_created_at' not in values
+        ):
+            for key in (
+                'orderCreatedAt',
+                'order_created_at',
+                'createdAt',
+                'created_at',
+                'orderDate',
+                'order_date',
+                'date',
+            ):
+                if key in item and item.get(key):
+                    values['order_created_at'] = self._coerce_value(
+                        'order_created_at',
+                        item.get(key),
+                        model_fields
+                    )
+                    break
+        return values
+
+    def _normalize_source_key(self, key):
+        if not key:
+            return ''
+        key = str(key).strip()
+        key = re.sub(r'[\s\-]+', '_', key)
+        key = re.sub(r'(.)([A-Z][a-z]+)', r'\1_\2', key)
+        key = re.sub(r'([a-z0-9])([A-Z])', r'\1_\2', key)
+        key = re.sub(r'_+', '_', key)
+        return key.lower().strip('_')
+
+    def _coerce_value(self, field_name, value, model_fields):
+        field = model_fields.get(field_name)
+        if not field:
+            return value
+        if field.type == 'datetime' and isinstance(value, str):
+            return self._normalize_datetime(value)
+        if field.type == 'date' and isinstance(value, str):
+            return self._normalize_date(value)
+        if field.type == 'float' and isinstance(value, str):
+            try:
+                return float(value)
+            except (ValueError, TypeError):
+                return value
+        if field.type == 'integer' and isinstance(value, str):
+            try:
+                return int(float(value))
+            except (ValueError, TypeError):
+                return value
+        if field.type == 'char' and not isinstance(value, str):
+            return str(value)
+        if field.type == 'boolean' and not isinstance(value, bool):
+            return bool(value)
+        return value
+
+    def _normalize_datetime(self, value):
+        """Delegate to shared date utility."""
+        return _normalize_dt(value)
+
+    def _normalize_date(self, value):
+        """Delegate to shared date utility."""
+        return _normalize_d(value)
+
+    def _upsert_items(self, items):
+        model_name = self.target_model_id.model
+        model = self.env[model_name].sudo()
+        model_fields = model._fields
+        detail_model = self.env['mysdb.order.detail'].sudo()
+        is_order = model_name == 'mysdb.order'
+
+        created = 0
+        updated = 0
+        errors = 0
+
+        # Parse unique fields once
+        unique_fields = []
+        if self.unique_field:
+            unique_fields = [
+                f.strip()
+                for f in str(self.unique_field).replace(';', ',').split(',')
+                if f.strip() and f.strip() in model_fields
+            ]
+
+        # ---------- Prepare all mapped values ----------
+        mapped_items = []  # list of (values_dict, original_item)
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            values = self._map_item_to_values(item, model_fields)
+            if values:
+                mapped_items.append((values, item))
+
+        if not mapped_items:
+            return 0, 0
+
+        # ---------- Batch lookup existing records ----------
+        existing_map = {}  # key_tuple -> recordset
+        if unique_fields:
+            # Build a mapping of key_tuple -> values for batch lookup
+            keys_to_lookup = []
+            for values, _item in mapped_items:
+                key_vals = tuple(values.get(f) for f in unique_fields)
+                if any(v in (None, False, '') for v in key_vals):
+                    continue
+                keys_to_lookup.append(key_vals)
+
+            if keys_to_lookup and len(unique_fields) == 1:
+                # Single unique field – use a single 'in' query
+                field_name = unique_fields[0]
+                all_vals = list(set(k[0] for k in keys_to_lookup))
+                # Search in batches of 1000 to avoid huge IN clauses
+                for i in range(0, len(all_vals), 1000):
+                    batch_vals = all_vals[i:i+1000]
+                    recs = model.search([(field_name, 'in', batch_vals)])
+                    for rec in recs:
+                        key = (getattr(rec, field_name),)
+                        existing_map[key] = rec
+            elif keys_to_lookup and len(unique_fields) > 1:
+                # Multiple unique fields – batch lookup using OR domain
+                # Group into batches of 200 to keep query size reasonable
+                unique_key_set = list(set(keys_to_lookup))
+                for i in range(0, len(unique_key_set), 200):
+                    batch_keys = unique_key_set[i:i+200]
+                    or_domain = []
+                    for key_vals in batch_keys:
+                        sub_domain = [(f, '=', v) for f, v in zip(unique_fields, key_vals)]
+                        if or_domain:
+                            or_domain = ['|'] + sub_domain + or_domain
+                        else:
+                            or_domain = sub_domain
+                    recs = model.search(or_domain)
+                    for rec in recs:
+                        key = tuple(getattr(rec, f) for f in unique_fields)
+                        existing_map[key] = rec
+
+        _logger.info(
+            "API upsert batch: source=%s total_items=%s existing_found=%s",
+            self.name, len(mapped_items), len(existing_map),
+        )
+
+        # ---------- Split into creates vs updates ----------
+        # Also dedup within the page: if the same key appears multiple times,
+        # keep only the LAST occurrence (latest data wins).
+        to_update = []       # list of (record, values, item)
+        no_key_create = []   # items with no/missing unique key
+        create_dedup = {}    # key_tuple -> (values, item)  — last-one-wins
+
+        for values, item in mapped_items:
+            if unique_fields:
+                key_vals = tuple(values.get(f) for f in unique_fields)
+                if any(v in (None, False, '') for v in key_vals):
+                    no_key_create.append((values, item))
+                    continue
+                existing_rec = existing_map.get(key_vals)
+                if existing_rec:
+                    to_update.append((existing_rec, values, item))
+                else:
+                    # Dedup within same page – last occurrence wins
+                    create_dedup[key_vals] = (values, item)
+            else:
+                no_key_create.append((values, item))
+
+        to_create = list(create_dedup.values())
+        dedup_saved = len(mapped_items) - len(to_update) - len(to_create) - len(no_key_create)
+        if dedup_saved > 0:
+            _logger.info(
+                "API upsert dedup: source=%s removed %s within-page duplicates",
+                self.name, dedup_saved,
+            )
+
+        # ---------- Batch UPDATE ----------
+        for rec, values, item in to_update:
+            try:
+                with self.env.cr.savepoint():
+                    rec.write(values)
+                    updated += 1
+                    if is_order:
+                        self._sync_project_list(item, detail_model)
+            except Exception as e:
+                errors += 1
+                _logger.warning(
+                    "API upsert update failed: source=%s key=%s error=%s",
+                    self.name,
+                    {f: values.get(f) for f in unique_fields},
+                    str(e)[:200],
+                )
+
+        # ---------- Batch CREATE ----------
+        all_to_create = to_create + no_key_create
+        if all_to_create:
+            BATCH_SIZE = 500
+            for i in range(0, len(all_to_create), BATCH_SIZE):
+                batch = all_to_create[i:i+BATCH_SIZE]
+                batch_vals = [v for v, _item in batch]
+                try:
+                    with self.env.cr.savepoint():
+                        model.create(batch_vals)
+                        created += len(batch)
+                        if is_order:
+                            for _v, item in batch:
+                                self._sync_project_list(item, detail_model)
+                except Exception as batch_err:
+                    _logger.warning(
+                        "API batch create failed (%s records), falling back to one-by-one: %s",
+                        len(batch), str(batch_err)[:200],
+                    )
+                    # Fall back to one-by-one
+                    for values, item in batch:
+                        try:
+                            with self.env.cr.savepoint():
+                                model.create([values])
+                                created += 1
+                                if is_order:
+                                    self._sync_project_list(item, detail_model)
+                        except Exception as e:
+                            errors += 1
+                            _logger.warning(
+                                "API single create failed: source=%s error=%s",
+                                self.name, str(e)[:200],
+                            )
+
+        if errors:
+            _logger.warning(
+                "API upsert completed with errors: source=%s created=%s updated=%s errors=%s",
+                self.name, created, updated, errors,
+            )
+        return created, updated
+
+    def _sync_project_list(self, item, detail_model):
+        project_list = item.get('projectList') or []
+        if not isinstance(project_list, list):
+            return
+        order_id = item.get('id')
+        if order_id is None:
+            return
+        order_linked_id = str(order_id)
+        detail_store_id = (
+            item.get('storeId')
+            or item.get('store_id')
+            or item.get('storeCode')
+        )
+        detail_created_at = (
+            item.get('orderCreatedAt')
+            or item.get('createdAt')
+            or item.get('created_at')
+            or item.get('creationDate')
+            or item.get('donationDate')
+            or item.get('orderDate')
+            or item.get('date')
+        )
+        if isinstance(detail_created_at, str):
+            detail_created_at = self._normalize_datetime(detail_created_at)
+        if not detail_created_at or not detail_store_id:
+            order_rec = self.env['mysdb.order'].sudo().search(
+                [('order_id', '=', order_linked_id)],
+                limit=1
+            )
+            if order_rec:
+                if not detail_created_at:
+                    detail_created_at = order_rec.order_created_at or order_rec.created_at
+                if not detail_store_id:
+                    detail_store_id = order_rec.store_id
+
+        for project in project_list:
+            if not isinstance(project, dict):
+                continue
+            product_name = project.get('projectName') or ''
+            product_sku = project.get('categoryName') or ''
+            unit_price = project.get('amount')
+            if unit_price is None:
+                unit_price = 0.0
+            quantity = project.get('quantity')
+            if quantity is None:
+                quantity = 0.0
+            total = float(unit_price) * float(quantity)
+
+            if not product_name and not product_sku and total == 0.0:
+                continue
+
+            # Prefer a stable match (order + product identifiers). Fall back to amount/qty.
+            base_domain = [
+                ('order_linked_id', '=', order_linked_id),
+                ('product_name', '=', product_name),
+                ('product_sku', '=', product_sku),
+            ]
+            existing = detail_model.search(base_domain, limit=1)
+            if not existing:
+                fallback_domain = [
+                    ('order_linked_id', '=', order_linked_id),
+                    ('product_name', '=', product_name),
+                    ('total', '=', total),
+                    ('quantity', '=', quantity),
+                ]
+                existing = detail_model.search(fallback_domain, limit=1)
+            vals = {
+                'order_linked_id': order_linked_id,
+                'product_name': product_name,
+                'product_sku': product_sku,
+                'total': total,
+                'quantity': quantity,
+                'created_at': detail_created_at,
+                'store_id': detail_store_id,
+            }
+            if existing:
+                existing.write(vals)
+            else:
+                detail_model.create(vals)
+
+    # ------------------------------------------------------------------
+    #  Public button – launches sync in a background thread so the UI
+    #  does not block / timeout.
+    # ------------------------------------------------------------------
+    def action_sync(self):
+        """Start sync in a background thread and return immediately."""
+        for rec in self:
+            rec.write({
+                'last_sync_at': fields.Datetime.now(),
+                'last_sync_status': 'ok',
+                'last_sync_message': 'Sync started – running in background…',
+                'last_sync_count': 0,
+                'last_sync_page': 0,
+            })
+        self.env.cr.commit()
+
+        dbname = self.env.cr.dbname
+        uid = self.env.uid
+        rec_ids = self.ids
+
+        t = threading.Thread(
+            target=self._sync_in_background,
+            args=(dbname, uid, rec_ids),
+            daemon=True,
+        )
+        t.start()
+
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': _('Sync Started'),
+                'message': _('Sync is running in the background. Refresh the page to see progress.'),
+                'type': 'info',
+                'sticky': False,
+            },
+        }
+
+    # ------------------------------------------------------------------
+    #  Background worker – runs in its own thread with a fresh cursor
+    # ------------------------------------------------------------------
+    @classmethod
+    def _sync_in_background(cls, dbname, uid, rec_ids):
+        """Execute the actual sync in a new cursor / environment."""
+        try:
+            registry = odoo.registry(dbname)
+            with registry.cursor() as cr:
+                env = odoo.api.Environment(cr, uid, {})
+                sources = env['mysdb.api.source'].browse(rec_ids).exists()
+                for rec in sources:
+                    rec._do_sync()
+                cr.commit()
+        except Exception:
+            _logger.exception("Background API sync thread crashed (ids=%s)", rec_ids)
+
+    # ------------------------------------------------------------------
+    #  Core sync logic (runs inside a dedicated cursor)
+    # ------------------------------------------------------------------
+    def _do_sync(self):
+        """Perform full sync for a single API source record."""
+        rec = self
+        total_created = 0
+        total_updated = 0
+        page = rec.pagination_start if rec.pagination_start is not None else 1
+        try:
+            _logger.info(
+                "API Sync start: source=%s model=%s pagination=%s start_page=%s page_size=%s",
+                rec.name,
+                rec.target_model_id.model if rec.target_model_id else None,
+                rec.enable_pagination,
+                rec.pagination_start,
+                rec.page_size,
+            )
+            empty_pages = 0
+            prev_page_ids = set()  # for loop detection
+
+            while True:
+                url = rec._build_request_url(page=page)
+                _logger.info("API Sync page start: source=%s page=%s url=%s", rec.name, page, url)
+                payload, raw = rec._fetch_json(url)
+                if rec.dump_json:
+                    rec._dump_raw_json(raw, page)
+                items = rec._extract_items(payload)
+
+                # --- Loop / duplicate-page detection ---
+                # Build a fingerprint set from the IDs in this page.
+                current_page_ids = set()
+                for item in items:
+                    if isinstance(item, dict):
+                        item_id = item.get('id') or item.get('ID')
+                        if item_id is not None:
+                            current_page_ids.add(item_id)
+                if (
+                    current_page_ids
+                    and prev_page_ids
+                    and current_page_ids == prev_page_ids
+                ):
+                    _logger.warning(
+                        "API Sync loop detected: source=%s page=%s returned same IDs as previous page. Stopping.",
+                        rec.name, page,
+                    )
+                    break
+                prev_page_ids = current_page_ids
+
+                created, updated = rec._upsert_items(items)
+                total_created += created
+                total_updated += updated
+                rec.write({
+                    'last_sync_page': page,
+                    'last_sync_page_items': len(items),
+                    'last_sync_page_created': created,
+                    'last_sync_page_updated': updated,
+                    'last_sync_message': (
+                        "Running… page %s | created %s | updated %s"
+                        % (page, total_created, total_updated)
+                    ),
+                })
+
+                # Commit after each page to persist progress.
+                self.env.cr.commit()
+
+                _logger.info(
+                    "API Sync page done: source=%s page=%s items=%s created=%s updated=%s running_total=%s",
+                    rec.name,
+                    page,
+                    len(items),
+                    created,
+                    updated,
+                    total_created + total_updated,
+                )
+
+                if not rec.enable_pagination:
+                    _logger.info("API Sync finished (no pagination): source=%s page=%s", rec.name, page)
+                    break
+                if not items:
+                    empty_pages += 1
+                    if empty_pages >= 3:
+                        _logger.info(
+                            "API Sync finished after %s empty pages: source=%s page=%s",
+                            empty_pages, rec.name, page,
+                        )
+                        break
+                else:
+                    empty_pages = 0
+                page += 1
+
+            msg = "Done – Created: %s, Updated: %s (pages: %s)" % (
+                total_created, total_updated, page,
+            )
+            rec.write({
+                'last_sync_at': fields.Datetime.now(),
+                'last_sync_status': 'ok',
+                'last_sync_message': msg,
+                'last_sync_count': total_created + total_updated,
+                'last_sync_page': page,
+            })
+            self.env.cr.commit()
+            self.env['mysdb.sync.log'].sudo().create({
+                'source_type': 'api',
+                'source_name': rec.name,
+                'sync_datetime': fields.Datetime.now(),
+                'sync_status': 'ok',
+                'sync_message': msg,
+            })
+            self.env.cr.commit()
+
+        except Exception as exc:
+            _logger.exception("API Sync failed: source=%s error=%s", rec.name, str(exc))
+            try:
+                self.env.cr.rollback()
+                rec.write({
+                    'last_sync_at': fields.Datetime.now(),
+                    'last_sync_status': 'error',
+                    'last_sync_message': (
+                        "Created: %s, Updated: %s, Last page: %s\nError: %s"
+                        % (total_created, total_updated, page, str(exc)[:500])
+                    ),
+                    'last_sync_count': total_created + total_updated,
+                })
+                self.env.cr.commit()
+            except Exception:
+                _logger.exception("Failed to write error status for API source %s", rec.name)
+            try:
+                self.env['mysdb.sync.log'].sudo().create({
+                    'source_type': 'api',
+                    'source_name': rec.name,
+                    'sync_datetime': fields.Datetime.now(),
+                    'sync_status': 'error',
+                    'sync_message': str(exc)[:1000],
+                })
+                self.env.cr.commit()
+            except Exception:
+                _logger.exception("Failed to write sync log for API source %s", rec.name)
+
+    @api.model
+    def cron_auto_sync_all(self):
+        """Called by scheduled action to sync all API sources with auto_sync=True."""
+        sources = self.search([('auto_sync', '=', True), ('active', '=', True)])
+        for src in sources:
+            try:
+                src._do_sync()
+                _logger.info("Auto-sync completed for API source: %s", src.name)
+            except Exception as e:
+                _logger.error("Auto-sync failed for API source %s: %s", src.name, str(e))
+
+    def _dump_raw_json(self, raw, page):
+        base_dir = (self.dump_directory or '').replace('\u00A0', ' ').strip().strip('"')
+        if not base_dir:
+            base_dir = os.path.join(config.get('data_dir') or '.', 'api_dumps')
+        if base_dir and os.path.splitext(base_dir)[1]:
+            base_dir = os.path.dirname(base_dir)
+        base_dir = os.path.normpath(base_dir)
+        if os.path.exists(base_dir) and not os.path.isdir(base_dir):
+            _logger.warning("Dump Directory is not a folder, falling back: %s", base_dir)
+            base_dir = os.path.join(config.get('data_dir') or '.', 'api_dumps')
+        if not os.path.isdir(base_dir):
+            try:
+                os.makedirs(base_dir, exist_ok=True)
+            except Exception as exc:
+                _logger.warning("Dump directory create failed (%s): %s", base_dir, str(exc))
+                base_dir = os.path.join(config.get('data_dir') or '.', 'api_dumps')
+                os.makedirs(base_dir, exist_ok=True)
+        safe_name = self._safe_filename(self.name or 'source')
+        prefix = self._safe_filename(self.dump_file_prefix or 'api_dump')
+        timestamp = fields.Datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f"{prefix}_{safe_name}_page{page}_{timestamp}.json"
+        full_path = os.path.join(base_dir, filename)
+        try:
+            with open(full_path, 'wb') as handle:
+                handle.write(raw)
+            size = os.path.getsize(full_path) if os.path.exists(full_path) else 0
+            self.last_dump_file = full_path
+            self.last_dump_size = size
+            _logger.info("Dump written: %s (%s bytes)", full_path, size)
+        except Exception as exc:
+            _logger.warning("Dump write failed (%s): %s", full_path, str(exc))
+
+    def _safe_filename(self, value):
+        value = value or ''
+        value = re.sub(r'[^A-Za-z0-9._-]+', '_', value)
+        return value.strip('_') or 'file'
+

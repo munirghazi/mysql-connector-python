@@ -1,164 +1,320 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <odoo>
     <data>
-        <!-- Standard User Access (Internal User) -->
-        <record id="access_mysdb_order_all" model="ir.model.access">
+
+        <!-- ════════════════════════════════════════════════════════════════
+             Module Category & Security Groups
+             ════════════════════════════════════════════════════════════════ -->
+        <record id="module_category_mysdb" model="ir.module.category">
+            <field name="name">MySDB Dashboard</field>
+            <field name="description">Access rights for MySDB Reporting module.</field>
+            <field name="sequence">100</field>
+        </record>
+
+        <!-- User: read-only on data, reports; limited write on tools -->
+        <record id="group_mysdb_user" model="res.groups">
+            <field name="name">User</field>
+            <field name="category_id" ref="module_category_mysdb"/>
+            <field name="comment">Read data, view reports, run tools.</field>
+        </record>
+
+        <!-- Manager: full CRUD on data models, tools, reports (implies User) -->
+        <record id="group_mysdb_manager" model="res.groups">
+            <field name="name">Manager</field>
+            <field name="category_id" ref="module_category_mysdb"/>
+            <field name="implied_ids" eval="[(4, ref('group_mysdb_user'))]"/>
+            <field name="comment">Full access to all MySDB data and reports.</field>
+        </record>
+
+        <!-- Admin (Settings) users automatically get MySDB Manager access -->
+        <record id="base.group_system" model="res.groups">
+            <field name="implied_ids" eval="[(4, ref('group_mysdb_manager'))]"/>
+        </record>
+
+        <!-- ════════════════════════════════════════════════════════════════
+             Access Rules — MySDB User (read-only on data models)
+             ════════════════════════════════════════════════════════════════ -->
+        <!-- ─── MySDB User: READ-ONLY on data models ─── -->
+        <record id="access_mysdb_order_user" model="ir.model.access">
             <field name="name">mysdb.order.user</field>
             <field name="model_id" ref="model_mysdb_order"/>
-            <field name="group_id" ref="base.group_user"/>
+            <field name="group_id" ref="group_mysdb_user"/>
             <field name="perm_read" eval="1"/>
-            <field name="perm_write" eval="1"/>
-            <field name="perm_create" eval="1"/>
-            <field name="perm_unlink" eval="1"/>
+            <field name="perm_write" eval="0"/>
+            <field name="perm_create" eval="0"/>
+            <field name="perm_unlink" eval="0"/>
         </record>
-        <record id="access_mysdb_order_detail_all" model="ir.model.access">
+        <record id="access_mysdb_order_detail_user" model="ir.model.access">
             <field name="name">mysdb.order.detail.user</field>
             <field name="model_id" ref="model_mysdb_order_detail"/>
-            <field name="group_id" ref="base.group_user"/>
+            <field name="group_id" ref="group_mysdb_user"/>
             <field name="perm_read" eval="1"/>
-            <field name="perm_write" eval="1"/>
-            <field name="perm_create" eval="1"/>
-            <field name="perm_unlink" eval="1"/>
+            <field name="perm_write" eval="0"/>
+            <field name="perm_create" eval="0"/>
+            <field name="perm_unlink" eval="0"/>
         </record>
-        <record id="access_mysdb_product_all" model="ir.model.access">
+        <record id="access_mysdb_product_user" model="ir.model.access">
             <field name="name">mysdb.product.user</field>
             <field name="model_id" ref="model_mysdb_product"/>
-            <field name="group_id" ref="base.group_user"/>
+            <field name="group_id" ref="group_mysdb_user"/>
             <field name="perm_read" eval="1"/>
-            <field name="perm_write" eval="1"/>
-            <field name="perm_create" eval="1"/>
-            <field name="perm_unlink" eval="1"/>
+            <field name="perm_write" eval="0"/>
+            <field name="perm_create" eval="0"/>
+            <field name="perm_unlink" eval="0"/>
         </record>
-        <record id="access_mysdb_store_all" model="ir.model.access">
+        <record id="access_mysdb_store_user" model="ir.model.access">
             <field name="name">mysdb.store.user</field>
             <field name="model_id" ref="model_mysdb_store"/>
-            <field name="group_id" ref="base.group_user"/>
+            <field name="group_id" ref="group_mysdb_user"/>
             <field name="perm_read" eval="1"/>
-            <field name="perm_write" eval="1"/>
-            <field name="perm_create" eval="1"/>
-            <field name="perm_unlink" eval="1"/>
+            <field name="perm_write" eval="0"/>
+            <field name="perm_create" eval="0"/>
+            <field name="perm_unlink" eval="0"/>
         </record>
-        <record id="access_mysdb_section_all" model="ir.model.access">
+        <record id="access_mysdb_section_user" model="ir.model.access">
             <field name="name">mysdb.section.user</field>
             <field name="model_id" ref="model_mysdb_section"/>
-            <field name="group_id" ref="base.group_user"/>
+            <field name="group_id" ref="group_mysdb_user"/>
             <field name="perm_read" eval="1"/>
-            <field name="perm_write" eval="1"/>
-            <field name="perm_create" eval="1"/>
-            <field name="perm_unlink" eval="1"/>
+            <field name="perm_write" eval="0"/>
+            <field name="perm_create" eval="0"/>
+            <field name="perm_unlink" eval="0"/>
         </record>
-        <record id="access_mysdb_project_all" model="ir.model.access">
+        <record id="access_mysdb_project_user" model="ir.model.access">
             <field name="name">mysdb.project.user</field>
             <field name="model_id" ref="model_mysdb_project"/>
-            <field name="group_id" ref="base.group_user"/>
+            <field name="group_id" ref="group_mysdb_user"/>
             <field name="perm_read" eval="1"/>
-            <field name="perm_write" eval="1"/>
-            <field name="perm_create" eval="1"/>
-            <field name="perm_unlink" eval="1"/>
+            <field name="perm_write" eval="0"/>
+            <field name="perm_create" eval="0"/>
+            <field name="perm_unlink" eval="0"/>
         </record>
-        <record id="access_mysdb_marketing_channel_all" model="ir.model.access">
+        <record id="access_mysdb_marketing_channel_user" model="ir.model.access">
             <field name="name">mysdb.marketing.channel.user</field>
             <field name="model_id" ref="model_mysdb_marketing_channel"/>
-            <field name="group_id" ref="base.group_user"/>
+            <field name="group_id" ref="group_mysdb_user"/>
             <field name="perm_read" eval="1"/>
-            <field name="perm_write" eval="1"/>
-            <field name="perm_create" eval="1"/>
-            <field name="perm_unlink" eval="1"/>
+            <field name="perm_write" eval="0"/>
+            <field name="perm_create" eval="0"/>
+            <field name="perm_unlink" eval="0"/>
         </record>
-        <record id="access_mysdb_marketing_account_all" model="ir.model.access">
+        <record id="access_mysdb_marketing_account_user" model="ir.model.access">
             <field name="name">mysdb.marketing.account.user</field>
             <field name="model_id" ref="model_mysdb_marketing_account"/>
-            <field name="group_id" ref="base.group_user"/>
+            <field name="group_id" ref="group_mysdb_user"/>
             <field name="perm_read" eval="1"/>
-            <field name="perm_write" eval="1"/>
-            <field name="perm_create" eval="1"/>
-            <field name="perm_unlink" eval="1"/>
+            <field name="perm_write" eval="0"/>
+            <field name="perm_create" eval="0"/>
+            <field name="perm_unlink" eval="0"/>
         </record>
-        <record id="access_mysdb_product_relation_all" model="ir.model.access">
+        <record id="access_mysdb_product_relation_user" model="ir.model.access">
             <field name="name">mysdb.product.relation.user</field>
             <field name="model_id" ref="model_mysdb_product_relation"/>
-            <field name="group_id" ref="base.group_user"/>
+            <field name="group_id" ref="group_mysdb_user"/>
             <field name="perm_read" eval="1"/>
-            <field name="perm_write" eval="1"/>
-            <field name="perm_create" eval="1"/>
-            <field name="perm_unlink" eval="1"/>
+            <field name="perm_write" eval="0"/>
+            <field name="perm_create" eval="0"/>
+            <field name="perm_unlink" eval="0"/>
         </record>
-        <record id="access_mysdb_product_marketing_relation_all" model="ir.model.access">
+        <record id="access_mysdb_product_marketing_relation_user" model="ir.model.access">
             <field name="name">mysdb.product.marketing.relation.user</field>
             <field name="model_id" ref="model_mysdb_product_marketing_relation"/>
-            <field name="group_id" ref="base.group_user"/>
+            <field name="group_id" ref="group_mysdb_user"/>
             <field name="perm_read" eval="1"/>
-            <field name="perm_write" eval="1"/>
-            <field name="perm_create" eval="1"/>
-            <field name="perm_unlink" eval="1"/>
+            <field name="perm_write" eval="0"/>
+            <field name="perm_create" eval="0"/>
+            <field name="perm_unlink" eval="0"/>
         </record>
-        <record id="access_mysdb_period_target_cost_all" model="ir.model.access">
+        <record id="access_mysdb_period_target_cost_user" model="ir.model.access">
             <field name="name">mysdb.period_target_cost.user</field>
             <field name="model_id" ref="model_mysdb_period_target_cost"/>
-            <field name="group_id" ref="base.group_user"/>
+            <field name="group_id" ref="group_mysdb_user"/>
             <field name="perm_read" eval="1"/>
-            <field name="perm_write" eval="1"/>
-            <field name="perm_create" eval="1"/>
-            <field name="perm_unlink" eval="1"/>
+            <field name="perm_write" eval="0"/>
+            <field name="perm_create" eval="0"/>
+            <field name="perm_unlink" eval="0"/>
         </record>
-        <record id="access_mysdb_pos_all" model="ir.model.access">
+        <record id="access_mysdb_pos_user" model="ir.model.access">
             <field name="name">mysdb.pos.user</field>
             <field name="model_id" ref="model_mysdb_pos"/>
-            <field name="group_id" ref="base.group_user"/>
+            <field name="group_id" ref="group_mysdb_user"/>
             <field name="perm_read" eval="1"/>
-            <field name="perm_write" eval="1"/>
-            <field name="perm_create" eval="1"/>
-            <field name="perm_unlink" eval="1"/>
+            <field name="perm_write" eval="0"/>
+            <field name="perm_create" eval="0"/>
+            <field name="perm_unlink" eval="0"/>
         </record>
-        <record id="access_mysdb_order_report_all" model="ir.model.access">
+
+        <!-- ─── MySDB User: READ-ONLY on report views ─── -->
+        <record id="access_mysdb_order_report_user" model="ir.model.access">
             <field name="name">mysdb.order.report.user</field>
             <field name="model_id" ref="model_mysdb_order_report"/>
-            <field name="group_id" ref="base.group_user"/>
+            <field name="group_id" ref="group_mysdb_user"/>
             <field name="perm_read" eval="1"/>
-            <field name="perm_write" eval="1"/>
-            <field name="perm_create" eval="1"/>
-            <field name="perm_unlink" eval="1"/>
+            <field name="perm_write" eval="0"/>
+            <field name="perm_create" eval="0"/>
+            <field name="perm_unlink" eval="0"/>
         </record>
-        <record id="access_mysdb_data_audit_all" model="ir.model.access">
+        <record id="access_mysdb_data_audit_user" model="ir.model.access">
             <field name="name">mysdb.data.audit.user</field>
             <field name="model_id" ref="model_mysdb_data_audit"/>
-            <field name="group_id" ref="base.group_user"/>
+            <field name="group_id" ref="group_mysdb_user"/>
             <field name="perm_read" eval="1"/>
-            <field name="perm_write" eval="1"/>
-            <field name="perm_create" eval="1"/>
-            <field name="perm_unlink" eval="1"/>
+            <field name="perm_write" eval="0"/>
+            <field name="perm_create" eval="0"/>
+            <field name="perm_unlink" eval="0"/>
         </record>
-        <record id="access_mysdb_project_income_report_all" model="ir.model.access">
+        <record id="access_mysdb_duplicate_order_detail_user" model="ir.model.access">
+            <field name="name">mysdb.duplicate.order.detail.user</field>
+            <field name="model_id" ref="model_mysdb_duplicate_order_detail"/>
+            <field name="group_id" ref="group_mysdb_user"/>
+            <field name="perm_read" eval="1"/>
+            <field name="perm_write" eval="0"/>
+            <field name="perm_create" eval="0"/>
+            <field name="perm_unlink" eval="0"/>
+        </record>
+        <record id="access_mysdb_project_income_report_user" model="ir.model.access">
             <field name="name">mysdb.project.income.report.user</field>
             <field name="model_id" ref="model_mysdb_project_income_report"/>
-            <field name="group_id" ref="base.group_user"/>
+            <field name="group_id" ref="group_mysdb_user"/>
             <field name="perm_read" eval="1"/>
             <field name="perm_write" eval="0"/>
             <field name="perm_create" eval="0"/>
             <field name="perm_unlink" eval="0"/>
         </record>
-        <record id="access_mysdb_marketing_income_report_all" model="ir.model.access">
+        <record id="access_mysdb_marketing_income_report_user" model="ir.model.access">
             <field name="name">mysdb.marketing.income.report.user</field>
             <field name="model_id" ref="model_mysdb_marketing_income_report"/>
-            <field name="group_id" ref="base.group_user"/>
+            <field name="group_id" ref="group_mysdb_user"/>
             <field name="perm_read" eval="1"/>
             <field name="perm_write" eval="0"/>
             <field name="perm_create" eval="0"/>
             <field name="perm_unlink" eval="0"/>
         </record>
-        <record id="access_mysdb_bulk_assign_project_wizard_all" model="ir.model.access">
+
+        <!-- ─── MySDB User: tools (wizards need CRUD to work) ─── -->
+        <record id="access_mysdb_bulk_assign_project_wizard_user" model="ir.model.access">
             <field name="name">mysdb.bulk.assign.project.wizard.user</field>
             <field name="model_id" ref="model_mysdb_bulk_assign_project_wizard"/>
-            <field name="group_id" ref="base.group_user"/>
+            <field name="group_id" ref="group_mysdb_user"/>
             <field name="perm_read" eval="1"/>
             <field name="perm_write" eval="1"/>
             <field name="perm_create" eval="1"/>
             <field name="perm_unlink" eval="1"/>
         </record>
-        <record id="access_mysdb_bulk_assign_marketing_wizard_all" model="ir.model.access">
+        <record id="access_mysdb_bulk_assign_marketing_wizard_user" model="ir.model.access">
             <field name="name">mysdb.bulk.assign.marketing.wizard.user</field>
             <field name="model_id" ref="model_mysdb_bulk_assign_marketing_wizard"/>
-            <field name="group_id" ref="base.group_user"/>
+            <field name="group_id" ref="group_mysdb_user"/>
+            <field name="perm_read" eval="1"/>
+            <field name="perm_write" eval="1"/>
+            <field name="perm_create" eval="1"/>
+            <field name="perm_unlink" eval="1"/>
+        </record>
+
+        <!-- ─── MySDB Manager: Full CRUD on all data models ─── -->
+        <record id="access_mysdb_order_manager" model="ir.model.access">
+            <field name="name">mysdb.order.manager</field>
+            <field name="model_id" ref="model_mysdb_order"/>
+            <field name="group_id" ref="group_mysdb_manager"/>
+            <field name="perm_read" eval="1"/>
+            <field name="perm_write" eval="1"/>
+            <field name="perm_create" eval="1"/>
+            <field name="perm_unlink" eval="1"/>
+        </record>
+        <record id="access_mysdb_order_detail_manager" model="ir.model.access">
+            <field name="name">mysdb.order.detail.manager</field>
+            <field name="model_id" ref="model_mysdb_order_detail"/>
+            <field name="group_id" ref="group_mysdb_manager"/>
+            <field name="perm_read" eval="1"/>
+            <field name="perm_write" eval="1"/>
+            <field name="perm_create" eval="1"/>
+            <field name="perm_unlink" eval="1"/>
+        </record>
+        <record id="access_mysdb_product_manager" model="ir.model.access">
+            <field name="name">mysdb.product.manager</field>
+            <field name="model_id" ref="model_mysdb_product"/>
+            <field name="group_id" ref="group_mysdb_manager"/>
+            <field name="perm_read" eval="1"/>
+            <field name="perm_write" eval="1"/>
+            <field name="perm_create" eval="1"/>
+            <field name="perm_unlink" eval="1"/>
+        </record>
+        <record id="access_mysdb_store_manager" model="ir.model.access">
+            <field name="name">mysdb.store.manager</field>
+            <field name="model_id" ref="model_mysdb_store"/>
+            <field name="group_id" ref="group_mysdb_manager"/>
+            <field name="perm_read" eval="1"/>
+            <field name="perm_write" eval="1"/>
+            <field name="perm_create" eval="1"/>
+            <field name="perm_unlink" eval="1"/>
+        </record>
+        <record id="access_mysdb_section_manager" model="ir.model.access">
+            <field name="name">mysdb.section.manager</field>
+            <field name="model_id" ref="model_mysdb_section"/>
+            <field name="group_id" ref="group_mysdb_manager"/>
+            <field name="perm_read" eval="1"/>
+            <field name="perm_write" eval="1"/>
+            <field name="perm_create" eval="1"/>
+            <field name="perm_unlink" eval="1"/>
+        </record>
+        <record id="access_mysdb_project_manager" model="ir.model.access">
+            <field name="name">mysdb.project.manager</field>
+            <field name="model_id" ref="model_mysdb_project"/>
+            <field name="group_id" ref="group_mysdb_manager"/>
+            <field name="perm_read" eval="1"/>
+            <field name="perm_write" eval="1"/>
+            <field name="perm_create" eval="1"/>
+            <field name="perm_unlink" eval="1"/>
+        </record>
+        <record id="access_mysdb_marketing_channel_manager" model="ir.model.access">
+            <field name="name">mysdb.marketing.channel.manager</field>
+            <field name="model_id" ref="model_mysdb_marketing_channel"/>
+            <field name="group_id" ref="group_mysdb_manager"/>
+            <field name="perm_read" eval="1"/>
+            <field name="perm_write" eval="1"/>
+            <field name="perm_create" eval="1"/>
+            <field name="perm_unlink" eval="1"/>
+        </record>
+        <record id="access_mysdb_marketing_account_manager" model="ir.model.access">
+            <field name="name">mysdb.marketing.account.manager</field>
+            <field name="model_id" ref="model_mysdb_marketing_account"/>
+            <field name="group_id" ref="group_mysdb_manager"/>
+            <field name="perm_read" eval="1"/>
+            <field name="perm_write" eval="1"/>
+            <field name="perm_create" eval="1"/>
+            <field name="perm_unlink" eval="1"/>
+        </record>
+        <record id="access_mysdb_product_relation_manager" model="ir.model.access">
+            <field name="name">mysdb.product.relation.manager</field>
+            <field name="model_id" ref="model_mysdb_product_relation"/>
+            <field name="group_id" ref="group_mysdb_manager"/>
+            <field name="perm_read" eval="1"/>
+            <field name="perm_write" eval="1"/>
+            <field name="perm_create" eval="1"/>
+            <field name="perm_unlink" eval="1"/>
+        </record>
+        <record id="access_mysdb_product_marketing_relation_manager" model="ir.model.access">
+            <field name="name">mysdb.product.marketing.relation.manager</field>
+            <field name="model_id" ref="model_mysdb_product_marketing_relation"/>
+            <field name="group_id" ref="group_mysdb_manager"/>
+            <field name="perm_read" eval="1"/>
+            <field name="perm_write" eval="1"/>
+            <field name="perm_create" eval="1"/>
+            <field name="perm_unlink" eval="1"/>
+        </record>
+        <record id="access_mysdb_period_target_cost_manager" model="ir.model.access">
+            <field name="name">mysdb.period_target_cost.manager</field>
+            <field name="model_id" ref="model_mysdb_period_target_cost"/>
+            <field name="group_id" ref="group_mysdb_manager"/>
+            <field name="perm_read" eval="1"/>
+            <field name="perm_write" eval="1"/>
+            <field name="perm_create" eval="1"/>
+            <field name="perm_unlink" eval="1"/>
+        </record>
+        <record id="access_mysdb_pos_manager" model="ir.model.access">
+            <field name="name">mysdb.pos.manager</field>
+            <field name="model_id" ref="model_mysdb_pos"/>
+            <field name="group_id" ref="group_mysdb_manager"/>
             <field name="perm_read" eval="1"/>
             <field name="perm_write" eval="1"/>
             <field name="perm_create" eval="1"/>
@@ -213,5 +369,38 @@
             <field name="perm_create" eval="1"/>
             <field name="perm_unlink" eval="1"/>
         </record>
+
+        <!-- ════════════════════════════════════════════════════════════════
+             Multi-Company Record Rules (configuration models only)
+             Users see records from their own company OR shared (no company).
+             ════════════════════════════════════════════════════════════════ -->
+        <record id="rule_mysdb_credential_company" model="ir.rule">
+            <field name="name">MySDB Credential: multi-company</field>
+            <field name="model_id" ref="model_mysdb_credential"/>
+            <field name="domain_force">['|', ('company_id', '=', False), ('company_id', 'in', company_ids)]</field>
+            <field name="global" eval="True"/>
+        </record>
+
+        <record id="rule_mysdb_connector_company" model="ir.rule">
+            <field name="name">MySDB Connector: multi-company</field>
+            <field name="model_id" ref="model_mysdb_connector"/>
+            <field name="domain_force">['|', ('company_id', '=', False), ('company_id', 'in', company_ids)]</field>
+            <field name="global" eval="True"/>
+        </record>
+
+        <record id="rule_mysdb_api_source_company" model="ir.rule">
+            <field name="name">MySDB API Source: multi-company</field>
+            <field name="model_id" ref="model_mysdb_api_source"/>
+            <field name="domain_force">['|', ('company_id', '=', False), ('company_id', 'in', company_ids)]</field>
+            <field name="global" eval="True"/>
+        </record>
+
+        <record id="rule_mysdb_sheet_source_company" model="ir.rule">
+            <field name="name">MySDB Sheet Source: multi-company</field>
+            <field name="model_id" ref="model_mysdb_sheet_source"/>
+            <field name="domain_force">['|', ('company_id', '=', False), ('company_id', 'in', company_ids)]</field>
+            <field name="global" eval="True"/>
+        </record>
+
     </data>
 </odoo>

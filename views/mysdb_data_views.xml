@@ -7,13 +7,38 @@
         <field name="priority">1</field>
         <field name="arch" type="xml">
             <tree string="Orders" export_xlsx="1">
+                <field name="source_system" optional="hide"/>
+                <field name="order_id"/>
                 <field name="order_code"/>
-                <field name="store_id" string="Store Code"/>
+                <field name="order_url" widget="url"/>
+                <field name="store_id"/>
                 <field name="store_name"/>
-                <field name="customer_name"/>
-                <field name="order_total" sum="Total Amount"/>
-                <field name="payment_status"/>
+                <field name="store_url" widget="url"/>
+                <field name="currency_code"/>
                 <field name="order_created_at"/>
+                <field name="order_updated_at"/>
+                <field name="created_at"/>
+                <field name="updated_at"/>
+                <field name="customer_id"/>
+                <field name="customer_name"/>
+                <field name="customer_email"/>
+                <field name="customer_mobile"/>
+                <field name="is_quick_checkout_order"/>
+                <field name="order_total" sum="Total Amount"/>
+                <field name="order_total_string"/>
+                <field name="has_different_transaction_currency"/>
+                <field name="transaction_currency_code"/>
+                <field name="transaction_reference"/>
+                <field name="transaction_amount"/>
+                <field name="transaction_amount_string"/>
+                <field name="issue_date"/>
+                <field name="payment_status"/>
+                <field name="payment_method_name"/>
+                <field name="payment_method_code"/>
+                <field name="payment_method_type"/>
+                <field name="source"/>
+                <field name="source_code"/>
+                <field name="is_potential_fraud"/>
             </tree>
         </field>
     </record>
@@ -27,6 +52,7 @@
                 <sheet>
                     <group>
                         <group string="Order Info">
+                            <field name="source_system"/>
                             <field name="order_code"/>
                             <field name="order_id"/>
                             <field name="order_created_at"/>
@@ -85,20 +111,57 @@
     </record>
 
     <!-- ORDER DETAILS VIEWS -->
+    <record id="view_mysdb_order_detail_link_product_wizard_form" model="ir.ui.view">
+        <field name="name">mysdb.order.detail.link.product.wizard.form</field>
+        <field name="model">mysdb.order.detail.link.product.wizard</field>
+        <field name="arch" type="xml">
+            <form string="Link Products">
+                <group>
+                    <field name="match_strategy"/>
+                    <field name="fallback_to_name"/>
+                    <field name="only_missing"/>
+                    <field name="overwrite_existing"/>
+                </group>
+                <footer>
+                    <button name="action_link_products" type="object" string="Link" class="btn-primary"/>
+                    <button string="Cancel" special="cancel" class="btn-secondary"/>
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_mysdb_order_detail_link_product_wizard" model="ir.actions.act_window">
+        <field name="name">Link Products</field>
+        <field name="res_model">mysdb.order.detail.link.product.wizard</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+    </record>
+
     <record id="view_mysdb_order_detail_tree" model="ir.ui.view">
         <field name="name">mysdb.order.detail.tree</field>
         <field name="model">mysdb.order.detail</field>
         <field name="priority">1</field>
         <field name="arch" type="xml">
             <tree string="Order Details" export_xlsx="1">
+                <header>
+                    <button name="%(action_mysdb_order_detail_link_product_wizard)d"
+                            type="action"
+                            string="Link Products"
+                            class="oe_highlight"/>
+                </header>
                 <field name="order_linked_id"/>
                 <field name="product_name"/>
                 <field name="product_sku"/>
+                <field name="product_ref_id"/>
+                <field name="product_id"/>
+                <field name="quantity"/>
                 <field name="total" sum="Total"/>
                 <field name="currency_code"/>
-                <field name="order_detail_uuid" optional="hide"/>
-                <field name="invoice_link" widget="url" optional="hide"/>
-                <field name="created_at" optional="hide"/>
+                <field name="store_id"/>
+                <field name="invoice_link" widget="url"/>
+                <field name="order_detail_uuid"/>
+                <field name="created_at"/>
+                <field name="updated_at"/>
             </tree>
         </field>
     </record>
@@ -109,15 +172,24 @@
         <field name="priority">1</field>
         <field name="arch" type="xml">
             <form string="Order Detail">
+                <header>
+                    <button name="%(action_mysdb_order_detail_link_product_wizard)d"
+                            type="action"
+                            string="Link Products"
+                            class="oe_highlight"/>
+                </header>
                 <sheet>
                     <group>
                         <group string="Product Info">
                             <field name="product_name"/>
                             <field name="product_sku"/>
+                            <field name="product_ref_id"/>
+                            <field name="product_id"/>
                             <field name="order_linked_id"/>
                             <field name="order_detail_uuid"/>
                         </group>
                         <group string="Financials">
+                            <field name="quantity"/>
                             <field name="total"/>
                             <field name="currency_code"/>
                             <field name="invoice_link" widget="url"/>
@@ -146,8 +218,42 @@
                 <field name="product_sku"/>
                 <field name="product_slug"/>
                 <field name="store_id"/>
+                <field name="section_id" options="{'no_create': True, 'no_open': True}"/>
                 <field name="product_price"/>
                 <field name="product_quantity"/>
+                <field name="category_id"/>
+                <field name="category_name"/>
+                <field name="donate_type_id"/>
+                <field name="donate_type_name"/>
+                <field name="creation_date"/>
+                <field name="association_id"/>
+                <field name="association_name"/>
+                <field name="branch_name"/>
+                <field name="project_code"/>
+                <field name="portal_url" widget="url"/>
+                <field name="project_link" widget="url"/>
+                <field name="project_view_link" widget="url"/>
+                <field name="affiliate_link_project" widget="url"/>
+                <field name="affiliate_link_project_case" widget="url"/>
+                <field name="affiliate_link_gift" widget="url"/>
+                <field name="affiliate_link_product" widget="url"/>
+                <field name="logo"/>
+                <field name="logo_webp"/>
+                <field name="required_amount"/>
+                <field name="total_donation_amount"/>
+                <field name="total_donation_amount_actual"/>
+                <field name="donor_count"/>
+                <field name="ratio"/>
+                <field name="sort_index"/>
+                <field name="is_active"/>
+                <field name="start_date_text"/>
+                <field name="end_date_text"/>
+                <field name="short_description"/>
+                <field name="start_date"/>
+                <field name="end_date"/>
+                <field name="has_project"/>
+                <field name="has_marketing"/>
+                <field name="assignment_status"/>
             </tree>
         </field>
     </record>
@@ -165,9 +271,9 @@
                 <field name="store_id" string="Store"/>
                 
                 <separator/>
-                <filter string="Products Without Project" name="filter_no_project" 
+                <filter string="Products Without Section" name="filter_no_project" 
                         domain="[('has_project', '=', False)]"
-                        help="Show only products not assigned to any project"/>
+                        help="Show only products not assigned to any section"/>
                 <filter string="Products Without Marketing" name="filter_no_marketing" 
                         domain="[('has_marketing', '=', False)]"
                         help="Show only products not assigned to any marketing account"/>
@@ -242,6 +348,7 @@
                 <field name="section_id_mysdb"/>
                 <field name="section_name_ar"/>
                 <field name="section_name_en"/>
+                <field name="project_id" options="{'no_create': True, 'no_open': True}" optional="hide"/>
             </tree>
         </field>
     </record>
@@ -257,6 +364,7 @@
                         <field name="section_id_mysdb"/>
                         <field name="section_name_ar"/>
                         <field name="section_name_en"/>
+                        <field name="project_id" options="{'no_create': True, 'no_open': True}"/>
                     </group>
                 </sheet>
             </form>
@@ -273,7 +381,6 @@
                 <field name="project_id_mysdb"/>
                 <field name="project_name_ar"/>
                 <field name="project_name_en"/>
-                <field name="section_id" options="{'no_create': True, 'no_open': True}"/>
                 <field name="store_id" options="{'no_create': True, 'no_open': True}"/>
             </tree>
         </field>
@@ -296,7 +403,6 @@
                         <group string="Mandatory Details">
                             <field name="project_id_mysdb"/>
                             <field name="project_name_ar"/>
-                            <field name="section_id" string="SECTION (ARABIC)" options="{'no_create': True, 'no_open': True}"/>
                             <field name="store_id" options="{'no_create': True, 'no_open': True}"/>
                         </group>
                     </group>
@@ -379,7 +485,8 @@
         <field name="arch" type="xml">
             <tree string="Product Relations" editable="bottom">
                 <field name="product_id" options="{'no_create': True, 'no_open': True}"/>
-                <field name="project_id" options="{'no_create': True, 'no_open': True}"/>
+                <field name="section_id" options="{'no_create': True, 'no_open': True}"/>
+                <field name="project_id" options="{'no_create': True, 'no_open': True}" optional="hide"/>
             </tree>
         </field>
     </record>
@@ -393,7 +500,8 @@
                 <sheet>
                     <group>
                         <field name="product_id" context="{'filter_used_products': True}" options="{'no_create': True, 'no_open': True}"/>
-                        <field name="project_id" options="{'no_create': True, 'no_open': True}"/>
+                        <field name="section_id" options="{'no_create': True, 'no_open': True}"/>
+                        <field name="project_id" options="{'no_create': True, 'no_open': True}" readonly="1"/>
                     </group>
                 </sheet>
             </form>
@@ -406,8 +514,10 @@
         <field name="arch" type="xml">
             <search string="Product Relation Search">
                 <field name="product_id"/>
+                <field name="section_id"/>
                 <field name="project_id"/>
                 <group expand="0" string="Group By">
+                    <filter string="Section" name="group_by_section" context="{'group_by': 'section_id'}"/>
                     <filter string="Project" name="group_by_project" context="{'group_by': 'project_id'}"/>
                     <filter string="Product" name="group_by_product" context="{'group_by': 'product_id'}"/>
                 </group>
@@ -426,6 +536,45 @@
                 <field name="account_id" options="{'no_create': True, 'no_open': True}"/>
             </tree>
         </field>
+    </record>
+
+    <!-- AFFILIATE VIEWS -->
+    <record id="view_mysdb_affiliate_tree" model="ir.ui.view">
+        <field name="name">mysdb.affiliate.tree</field>
+        <field name="model">mysdb.affiliate</field>
+        <field name="arch" type="xml">
+            <tree string="Affiliates" export_xlsx="1">
+                <field name="affiliate_name"/>
+                <field name="affiliate_account"/>
+                <field name="product_id"/>
+                <field name="url_target"/>
+                <field name="publish_url"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="view_mysdb_affiliate_form" model="ir.ui.view">
+        <field name="name">mysdb.affiliate.form</field>
+        <field name="model">mysdb.affiliate</field>
+        <field name="arch" type="xml">
+            <form string="Affiliate">
+                <sheet>
+                    <group>
+                        <field name="affiliate_name"/>
+                        <field name="affiliate_account"/>
+                        <field name="product_id"/>
+                        <field name="url_target" widget="url"/>
+                        <field name="publish_url" widget="url"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_mysdb_affiliate" model="ir.actions.act_window">
+        <field name="name">Affiliates</field>
+        <field name="res_model">mysdb.affiliate</field>
+        <field name="view_mode">tree,form</field>
     </record>
 
     <!-- PERIOD TARGET COST VIEWS -->
@@ -506,8 +655,10 @@
                 <field name="section_name_ar"/>
                 <field name="project_name_ar"/>
                 <field name="marketing_account_name_ar"/>
+                <field name="product_id_char"/>
                 <field name="product_name"/>
                 <field name="line_total" sum="Total Lines"/>
+                <field name="order_total" sum="Total Orders"/>
                 <field name="payment_status" widget="badge" decoration-success="payment_status == 'paid'"/>
                 <field name="transaction_reference" optional="hide"/>
                 <field name="payment_method_name" optional="hide"/>
@@ -537,8 +688,8 @@
         <field name="model">mysdb.data.audit</field>
         <field name="priority">1</field>
         <field name="arch" type="xml">
-            <tree string="Data Maintenance Audit" create="false" delete="false" decoration-danger="issue_type == 'missing_product'" decoration-warning="issue_type in ('no_project', 'no_marketing')">
-                <field name="issue_type" widget="badge" decoration-danger="issue_type == 'missing_product'" decoration-warning="issue_type in ('no_project', 'no_marketing')"/>
+            <tree string="Data Maintenance Audit" create="false" delete="false" decoration-danger="issue_type in ('missing_product', 'orphan_detail')" decoration-warning="issue_type in ('no_project', 'no_marketing')">
+                <field name="issue_type" widget="badge" decoration-danger="issue_type in ('missing_product', 'orphan_detail')" decoration-warning="issue_type in ('no_project', 'no_marketing')"/>
                 <field name="product_sku"/>
                 <field name="product_name"/>
                 <field name="store_id"/>
@@ -554,6 +705,7 @@
             <search string="Audit Search">
                 <field name="product_name"/>
                 <field name="product_sku"/>
+                <filter string="Orphan Details" name="orphan" domain="[('issue_type','=','orphan_detail')]"/>
                 <filter string="Missing in Catalog" name="missing" domain="[('issue_type','=','missing_product')]"/>
                 <filter string="No Project" name="no_project" domain="[('issue_type','=','no_project')]"/>
                 <filter string="No Marketing Account" name="no_marketing" domain="[('issue_type','=','no_marketing')]"/>
@@ -579,10 +731,38 @@
         <field name="view_mode">tree,form,pivot</field>
     </record>
 
+    <!-- ORDER DETAIL SEARCH VIEW -->
+    <record id="view_mysdb_order_detail_search" model="ir.ui.view">
+        <field name="name">mysdb.order.detail.search</field>
+        <field name="model">mysdb.order.detail</field>
+        <field name="arch" type="xml">
+            <search string="Order Details">
+                <field name="order_linked_id"/>
+                <field name="product_name"/>
+                <field name="product_sku"/>
+                <field name="store_id"/>
+                <group expand="0" string="Group By">
+                    <filter string="Store" name="group_by_store" context="{'group_by': 'store_id'}"/>
+                    <filter string="Product SKU" name="group_by_sku" context="{'group_by': 'product_sku'}"/>
+                    <filter string="Currency" name="group_by_currency" context="{'group_by': 'currency_code'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
     <record id="action_mysdb_order_details" model="ir.actions.act_window">
         <field name="name">Order Details</field>
         <field name="res_model">mysdb.order.detail</field>
         <field name="view_mode">tree,form,pivot</field>
+        <field name="search_view_id" ref="view_mysdb_order_detail_search"/>
+    </record>
+
+    <!-- SERVER ACTION: Orphan Order Details -->
+    <record id="action_find_orphan_order_details" model="ir.actions.server">
+        <field name="name">Orphan Order Details</field>
+        <field name="model_id" ref="model_mysdb_order_detail"/>
+        <field name="state">code</field>
+        <field name="code">action = model.action_find_orphan_details()</field>
     </record>
 
     <record id="action_mysdb_products" model="ir.actions.act_window">

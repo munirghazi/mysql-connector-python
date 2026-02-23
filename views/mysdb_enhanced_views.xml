@@ -41,6 +41,7 @@
                 <filter string="Medium Priority" name="filter_medium" domain="[('priority', '=', 'medium')]"/>
                 <filter string="Low Priority" name="filter_low" domain="[('priority', '=', 'low')]"/>
                 <separator/>
+                <filter string="Orphan Details" name="filter_orphan" domain="[('issue_type', '=', 'orphan_detail')]"/>
                 <filter string="Missing from Catalog" name="filter_missing" domain="[('issue_type', '=', 'missing_product')]"/>
                 <filter string="No Project" name="filter_no_project" domain="[('issue_type', '=', 'no_project')]"/>
                 <filter string="No Marketing" name="filter_no_marketing" domain="[('issue_type', '=', 'no_marketing')]"/>
@@ -77,14 +78,74 @@
                 No data quality issues found!
             </p>
             <p>
-                This report shows products that need attention:
+                This report shows data quality issues:
                 <ul>
-                    <li>Missing from catalog but in orders</li>
+                    <li><b>Orphan Order Details</b> - details with no parent order</li>
+                    <li>Missing from catalog but referenced in orders</li>
                     <li>Missing project assignment</li>
                     <li>Missing marketing assignment</li>
                     <li>Incomplete assignment (only one of project/marketing)</li>
                 </ul>
                 Issues are prioritized by order recency and revenue impact.
+            </p>
+        </field>
+    </record>
+
+    <!-- ========================================
+         DUPLICATE ORDER DETAIL REPORT VIEWS
+         ======================================== -->
+
+    <record id="view_mysdb_duplicate_order_detail_tree" model="ir.ui.view">
+        <field name="name">mysdb.duplicate.order.detail.tree</field>
+        <field name="model">mysdb.duplicate.order.detail</field>
+        <field name="arch" type="xml">
+            <tree string="Duplicate Order Details" 
+                  decoration-danger="extra_report_rows > 5"
+                  decoration-warning="extra_report_rows > 0"
+                  create="false" delete="false" edit="false"
+                  export_xlsx="1">
+                <field name="order_id"/>
+                <field name="store_id"/>
+                <field name="store_name"/>
+                <field name="duplicate_count" string="# Dup Orders"/>
+                <field name="detail_count" string="# Details"/>
+                <field name="extra_report_rows" string="Extra Rows" sum="Total Extra"/>
+                <field name="customer_names"/>
+                <field name="order_total" sum="Total"/>
+                <field name="payment_status"/>
+            </tree>
+        </field>
+    </record>
+
+    <record id="view_mysdb_duplicate_order_detail_search" model="ir.ui.view">
+        <field name="name">mysdb.duplicate.order.detail.search</field>
+        <field name="model">mysdb.duplicate.order.detail</field>
+        <field name="arch" type="xml">
+            <search string="Duplicate Order Details">
+                <field name="order_id"/>
+                <field name="store_id"/>
+                <field name="customer_names"/>
+                <group expand="0" string="Group By">
+                    <filter string="Store" name="group_store" context="{'group_by': 'store_id'}"/>
+                    <filter string="Payment Status" name="group_payment" context="{'group_by': 'payment_status'}"/>
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="action_mysdb_duplicate_order_detail" model="ir.actions.act_window">
+        <field name="name">Duplicate Order Details</field>
+        <field name="res_model">mysdb.duplicate.order.detail</field>
+        <field name="view_mode">tree</field>
+        <field name="search_view_id" ref="view_mysdb_duplicate_order_detail_search"/>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">
+                No duplicate orders found!
+            </p>
+            <p>
+                This report lists orders that exist multiple times in the Orders table
+                (same order_id + store_id). Each duplicate order causes extra rows
+                in the Orders Analysis report.
             </p>
         </field>
     </record>
@@ -339,10 +400,10 @@
         <field name="name">mysdb.bulk.assign.project.wizard.form</field>
         <field name="model">mysdb.bulk.assign.project.wizard</field>
         <field name="arch" type="xml">
-            <form string="Bulk Assign Products to Project">
+            <form string="Bulk Assign Products to Section">
                 <group>
                     <group string="Target">
-                        <field name="project_id" options="{'no_create': True}"/>
+                        <field name="section_id" options="{'no_create': True}"/>
                     </group>
                     <group string="Filters">
                         <field name="store_id" options="{'no_create': True}"/>
@@ -363,7 +424,7 @@
                 <notebook>
                     <page string="Products to Assign">
                         <field name="product_ids" widget="many2many" nolabel="1"
-                               context="{'search_default_filter_no_project': 1}"
+                               context="{'search_default_filter_no_project': 1, 'filter_type': 'section'}"
                                options="{'no_create': True, 'no_open': True}">
                             <tree>
                                 <field name="product_sku"/>
@@ -386,7 +447,7 @@
     </record>
 
     <record id="action_mysdb_bulk_assign_project" model="ir.actions.act_window">
-        <field name="name">Bulk Assign to Project</field>
+        <field name="name">Bulk Assign to Section</field>
         <field name="res_model">mysdb.bulk.assign.project.wizard</field>
         <field name="view_mode">form</field>
         <field name="target">new</field>
@@ -503,10 +564,9 @@
                     </group>
                     <group string="Cost Calculation">
                         <field name="cost_calculation_type" widget="radio"/>
-                        <field name="cost_percentage" 
-                               invisible="cost_calculation_type != 'percentage'" 
-                               required="cost_calculation_type == 'percentage'"
-                               widget="percentage"/>
+                        <field name="cost_percentage"
+                               invisible="cost_calculation_type != 'percentage'"
+                               required="cost_calculation_type == 'percentage'"/>
                         <field name="cost_amount" 
                                widget="monetary"
                                readonly="cost_calculation_type == 'percentage'"/>
