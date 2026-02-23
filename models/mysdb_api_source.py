@@ -1055,6 +1055,162 @@ class MysdbApiSource(models.Model):
         return values
 
     # ------------------------------------------------------------------
+    #  Build Product Catalog from Order Details
+    #  For stores where the Products API is unavailable (e.g. Zid
+    #  donation stores), this extracts unique products from synced
+    #  order detail records and creates mysdb.product entries.
+    # ------------------------------------------------------------------
+    def action_build_product_catalog(self):
+        """Create mysdb.product records from unique products in order details."""
+        rec = self.ensure_one()
+
+        # Determine store_id: from detail parent domain or mapping const
+        store_id = None
+        if rec.detail_parent_domain:
+            try:
+                domain = json.loads(rec.detail_parent_domain)
+                for clause in domain:
+                    if (
+                        isinstance(clause, (list, tuple))
+                        and len(clause) >= 3
+                        and clause[0] == 'store_id'
+                        and clause[1] == '='
+                    ):
+                        store_id = str(clause[2])
+                        break
+            except Exception:
+                pass
+        if not store_id:
+            # Try to get from the mapping const
+            mapping = rec.mapping_json or {}
+            if isinstance(mapping, str):
+                try:
+                    mapping = json.loads(mapping)
+                except Exception:
+                    mapping = {}
+            for _tf, sk in mapping.items():
+                if isinstance(sk, dict) and sk.get('const'):
+                    store_id = str(sk['const'])
+                    break
+                if isinstance(sk, str) and sk.startswith('const:'):
+                    store_id = sk.split('const:', 1)[1]
+                    break
+
+        # Query unique products from order details
+        detail_domain = []
+        if store_id:
+            detail_domain.append(('store_id', '=', store_id))
+
+        detail_model = self.env['mysdb.order.detail'].sudo()
+        product_model = self.env['mysdb.product'].sudo()
+
+        # Read all unique (product_sku, product_name) combos from details
+        details = detail_model.search_read(
+            detail_domain,
+            ['product_sku', 'product_name', 'product_id', 'store_id'],
+        )
+        # Build unique product map by SKU (prefer non-empty names)
+        unique_map = {}  # sku -> {sku, name, product_id, store_id}
+        for d in details:
+            sku = (d.get('product_sku') or '').strip()
+            if not sku:
+                continue
+            pid = d.get('product_id') or ''
+            sid = d.get('store_id') or store_id or ''
+            name = (d.get('product_name') or '').strip()
+            key = (sku, sid)
+            if key not in unique_map or (name and not unique_map[key].get('name')):
+                unique_map[key] = {
+                    'sku': sku,
+                    'name': name,
+                    'product_id_raw': str(pid) if pid else '',
+                    'store_id': sid,
+                }
+
+        if not unique_map:
+            return {
+                'type': 'ir.actions.client',
+                'tag': 'display_notification',
+                'params': {
+                    'title': _('No Products Found'),
+                    'message': _(
+                        'No order details with product SKUs found. '
+                        'Please sync orders and order details first.'
+                    ),
+                    'type': 'warning',
+                    'sticky': False,
+                },
+            }
+
+        # Find which already exist in mysdb.product
+        all_skus = list(set(info['sku'] for info in unique_map.values()))
+        existing_skus = set()
+        for i in range(0, len(all_skus), 1000):
+            batch = all_skus[i:i + 1000]
+            if store_id:
+                existing = product_model.search_read(
+                    [('product_sku', 'in', batch), ('store_id', '=', store_id)],
+                    ['product_sku'],
+                )
+            else:
+                existing = product_model.search_read(
+                    [('product_sku', 'in', batch)],
+                    ['product_sku'],
+                )
+            for e in existing:
+                existing_skus.add(e['product_sku'])
+
+        # Create missing products
+        to_create = []
+        for (sku, sid), info in unique_map.items():
+            if sku in existing_skus:
+                continue
+            vals = {
+                'product_id': info['product_id_raw'] or sku,
+                'product_name': info['name'] or sku,
+                'product_sku': sku,
+                'store_id': info['store_id'],
+            }
+            to_create.append(vals)
+            existing_skus.add(sku)  # avoid duplicates in batch
+
+        created = 0
+        if to_create:
+            try:
+                product_model.create(to_create)
+                created = len(to_create)
+            except Exception:
+                # Fall back to one-by-one
+                for vals in to_create:
+                    try:
+                        with self.env.cr.savepoint():
+                            product_model.create([vals])
+                            created += 1
+                    except Exception as e:
+                        _logger.warning(
+                            "Build catalog: failed to create product %s: %s",
+                            vals.get('product_sku'), str(e)[:200],
+                        )
+
+        msg = _(
+            "Product Catalog built!\n"
+            "Unique products in order details: %s\n"
+            "Already in catalog: %s\n"
+            "Newly created: %s"
+        ) % (len(unique_map), len(unique_map) - len(to_create), created)
+
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': _('Product Catalog Updated'),
+                'message': msg,
+                'type': 'success' if created > 0 else 'info',
+                'sticky': True,
+            },
+        }
+
+    # ------------------------------------------------------------------
     #  Public button – launches sync in a background thread so the UI
     #  does not block / timeout.
     # ------------------------------------------------------------------

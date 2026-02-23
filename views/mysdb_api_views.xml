@@ -26,6 +26,11 @@
                             string="Sync Order Details"
                             class="btn-secondary"
                             invisible="not detail_sync_enabled"/>
+                    <button name="action_build_product_catalog" type="object"
+                            string="Build Product Catalog"
+                            class="btn-secondary"
+                            invisible="not detail_sync_enabled"
+                            confirm="This will create mysdb.product records from unique products found in order details. Continue?"/>
                 </header>
                 <sheet>
                     <group>
