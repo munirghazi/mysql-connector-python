@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import json
 import threading
+import time
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -110,6 +111,66 @@ class MysdbApiSource(models.Model):
     last_sync_page_items = fields.Integer(string='Last Page Items', readonly=True)
     last_sync_page_created = fields.Integer(string='Last Page Created', readonly=True)
     last_sync_page_updated = fields.Integer(string='Last Page Updated', readonly=True)
+
+    # ------------------------------------------------------------------
+    #  Detail Sync – per-record child fetching (e.g. Zid order products)
+    #  This does NOT affect Jood/Bayan which use _sync_project_list().
+    # ------------------------------------------------------------------
+    detail_sync_enabled = fields.Boolean(
+        'Enable Detail Sync', default=False,
+        help="When enabled, a second pass fetches child records for each "
+             "parent record via a per-record API call (e.g. order products)."
+    )
+    detail_url_pattern = fields.Char(
+        'Detail URL Pattern',
+        help="URL template with {id} placeholder.\n"
+             "Example: https://api.zid.sa/v1/managers/store/orders/{id}/view"
+    )
+    detail_parent_id_field = fields.Char(
+        'Parent ID Field', default='order_id',
+        help="Field on the parent model whose value replaces {id} in the URL."
+    )
+    detail_parent_domain = fields.Text(
+        'Parent Filter Domain',
+        help='Optional JSON domain to scope which parent records to process.\n'
+             'Example: [["store_id","=","1170879"]]'
+    )
+    detail_data_root_key = fields.Char(
+        'Detail Data Root Key',
+        help="Dot-notation path to the child items list.\n"
+             "Example: order.products"
+    )
+    detail_target_model_id = fields.Many2one(
+        'ir.model', string='Detail Target Model',
+        domain="[('model', '=ilike', 'mysdb.%')]",
+        ondelete='set null',
+    )
+    detail_unique_field = fields.Char(
+        'Detail Unique Field',
+        help="Field used to upsert detail records (e.g. order_detail_uuid)."
+    )
+    detail_mapping_json = fields.Text(
+        'Detail Field Mapping',
+        help=(
+            "JSON mapping for detail records.\n"
+            "Use 'parent:key' to pull values from the parent object "
+            "(the container of the items list).\n"
+            "Example:\n"
+            '{"order_linked_id":"parent:id","store_id":"parent:store_id",'
+            '"product_name":"name","product_sku":"sku","total":"total"}'
+        )
+    )
+    detail_request_delay = fields.Float(
+        'Detail Request Delay (sec)', default=0.3,
+        help="Seconds to wait between per-record API calls."
+    )
+    detail_last_sync_at = fields.Datetime('Detail Last Sync At', readonly=True)
+    detail_last_sync_status = fields.Selection(
+        [('ok', 'OK'), ('error', 'Error')],
+        string='Detail Sync Status', readonly=True,
+    )
+    detail_last_sync_message = fields.Text('Detail Sync Message', readonly=True)
+    detail_last_sync_count = fields.Integer('Detail Sync Count', readonly=True)
 
     def _build_request_url(self, page=None):
         url = (self.request_url or '').strip()
@@ -611,6 +672,387 @@ class MysdbApiSource(models.Model):
                 existing.write(vals)
             else:
                 detail_model.create(vals)
+
+    # ==================================================================
+    #  DETAIL SYNC – per-record child fetching (e.g. Zid order → products)
+    #  Completely independent of _sync_project_list (Jood/Bayan).
+    # ==================================================================
+
+    def action_sync_details(self):
+        """Start detail sync in a background thread and return immediately."""
+        for rec in self:
+            if not rec.detail_sync_enabled:
+                raise ValidationError(
+                    _("Detail Sync is not enabled for '%s'.") % rec.name
+                )
+            rec.write({
+                'detail_last_sync_at': fields.Datetime.now(),
+                'detail_last_sync_status': 'ok',
+                'detail_last_sync_message': 'Detail sync started – running in background…',
+                'detail_last_sync_count': 0,
+            })
+        self.env.cr.commit()
+
+        dbname = self.env.cr.dbname
+        uid = self.env.uid
+        rec_ids = self.ids
+
+        t = threading.Thread(
+            target=self._detail_sync_in_background,
+            args=(dbname, uid, rec_ids),
+            daemon=True,
+        )
+        t.start()
+
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': _('Detail Sync Started'),
+                'message': _(
+                    'Detail sync is running in the background. '
+                    'Refresh the page to see progress.'
+                ),
+                'type': 'info',
+                'sticky': False,
+            },
+        }
+
+    @classmethod
+    def _detail_sync_in_background(cls, dbname, uid, rec_ids):
+        """Execute detail sync in a new cursor / environment."""
+        try:
+            registry = odoo.registry(dbname)
+            with registry.cursor() as cr:
+                env = odoo.api.Environment(cr, uid, {})
+                sources = env['mysdb.api.source'].browse(rec_ids).exists()
+                for rec in sources:
+                    rec._do_sync_details()
+                cr.commit()
+        except Exception:
+            _logger.exception(
+                "Background detail sync thread crashed (ids=%s)", rec_ids
+            )
+
+    def _do_sync_details(self):
+        """Fetch child records for each parent record via per-record API."""
+        rec = self
+        total_created = 0
+        total_updated = 0
+        total_skipped = 0
+        total_errors = 0
+        total_fetched = 0
+
+        try:
+            if not rec.detail_url_pattern or not rec.detail_target_model_id:
+                raise ValidationError(
+                    _("Detail URL Pattern and Detail Target Model are required.")
+                )
+
+            parent_model = self.env[rec.target_model_id.model].sudo()
+            detail_model = self.env[rec.detail_target_model_id.model].sudo()
+            detail_fields = detail_model._fields
+            id_field = (rec.detail_parent_id_field or 'order_id').strip()
+
+            # Parse detail mapping
+            mapping = {}
+            if rec.detail_mapping_json:
+                raw = rec.detail_mapping_json
+                if isinstance(raw, str):
+                    mapping = json.loads(raw)
+                elif isinstance(raw, dict):
+                    mapping = raw
+            if not mapping:
+                raise ValidationError(_("Detail Field Mapping is required."))
+
+            # Parse optional parent domain filter
+            parent_domain = []
+            if rec.detail_parent_domain:
+                try:
+                    parent_domain = json.loads(rec.detail_parent_domain)
+                except Exception:
+                    _logger.warning(
+                        "Invalid detail_parent_domain JSON, ignoring: %s",
+                        rec.detail_parent_domain,
+                    )
+
+            # ------ Determine which parents already have details ------
+            # Find the mapping entry that links child → parent ID
+            detail_link_field = None
+            for tf, sk in mapping.items():
+                if isinstance(sk, str) and sk.startswith('parent:'):
+                    parent_key = sk.split('parent:', 1)[1]
+                    if parent_key in ('id', 'order_id'):
+                        detail_link_field = tf
+                        break
+
+            # Fetch all parent records
+            parents = parent_model.search(parent_domain, order='id asc')
+            parent_list = []
+            for p in parents:
+                pid = getattr(p, id_field, None)
+                if pid:
+                    parent_list.append((str(pid), p))
+
+            _logger.info(
+                "Detail sync start: source=%s parents=%s detail_model=%s id_field=%s",
+                rec.name, len(parent_list),
+                rec.detail_target_model_id.model, id_field,
+            )
+
+            # Identify parents that already have child records (skip them)
+            already_synced = set()
+            if detail_link_field and detail_link_field in detail_fields:
+                all_pids = list(set(pid for pid, _ in parent_list))
+                for i in range(0, len(all_pids), 1000):
+                    batch = all_pids[i:i + 1000]
+                    existing = detail_model.search_read(
+                        [(detail_link_field, 'in', batch)],
+                        [detail_link_field],
+                    )
+                    for e in existing:
+                        already_synced.add(str(e[detail_link_field]))
+
+            to_fetch = [
+                (pid, parent) for pid, parent in parent_list
+                if pid not in already_synced
+            ]
+            total_skipped = len(parent_list) - len(to_fetch)
+
+            _logger.info(
+                "Detail sync: total=%s already_synced=%s to_fetch=%s",
+                len(parent_list), total_skipped, len(to_fetch),
+            )
+            rec.write({
+                'detail_last_sync_message': (
+                    "Scanning… %s parents, %s already synced, %s to fetch"
+                    % (len(parent_list), total_skipped, len(to_fetch))
+                ),
+            })
+            self.env.cr.commit()
+
+            # ------ Per-record fetch loop ------
+            for idx, (pid, parent) in enumerate(to_fetch):
+                try:
+                    url = rec.detail_url_pattern.replace('{id}', str(pid))
+                    payload, _raw = rec._fetch_json(url)
+                    total_fetched += 1
+
+                    # Resolve detail_data_root_key (dot-notation)
+                    parent_context, items = rec._extract_detail_items(payload)
+
+                    if not items:
+                        _logger.debug(
+                            "Detail sync: no items for parent %s", pid,
+                        )
+                    else:
+                        page_created, page_updated, page_errors = (
+                            rec._upsert_detail_items(
+                                items, parent_context, mapping,
+                                detail_model, detail_fields,
+                            )
+                        )
+                        total_created += page_created
+                        total_updated += page_updated
+                        total_errors += page_errors
+
+                except Exception as e:
+                    total_errors += 1
+                    _logger.warning(
+                        "Detail fetch error for parent %s: %s",
+                        pid, str(e)[:300],
+                    )
+
+                # Progress update & commit every 20 records
+                if (idx + 1) % 20 == 0 or idx == len(to_fetch) - 1:
+                    rec.write({
+                        'detail_last_sync_message': (
+                            "Progress: %s/%s fetched, %s created, "
+                            "%s updated, %s errors"
+                            % (
+                                idx + 1, len(to_fetch),
+                                total_created, total_updated, total_errors,
+                            )
+                        ),
+                        'detail_last_sync_count': total_created + total_updated,
+                    })
+                    self.env.cr.commit()
+                else:
+                    self.env.cr.commit()
+
+                if rec.detail_request_delay:
+                    time.sleep(rec.detail_request_delay)
+
+            # ------ Done ------
+            msg = (
+                "Done – Fetched: %s, Created: %s, Updated: %s, "
+                "Skipped (already synced): %s, Errors: %s"
+                % (
+                    total_fetched, total_created, total_updated,
+                    total_skipped, total_errors,
+                )
+            )
+            rec.write({
+                'detail_last_sync_at': fields.Datetime.now(),
+                'detail_last_sync_status': 'ok',
+                'detail_last_sync_message': msg,
+                'detail_last_sync_count': total_created + total_updated,
+            })
+            self.env.cr.commit()
+            _logger.info("Detail sync done: source=%s %s", rec.name, msg)
+
+        except Exception as exc:
+            _logger.exception(
+                "Detail sync failed: source=%s error=%s",
+                rec.name, str(exc),
+            )
+            try:
+                self.env.cr.rollback()
+                rec.write({
+                    'detail_last_sync_at': fields.Datetime.now(),
+                    'detail_last_sync_status': 'error',
+                    'detail_last_sync_message': (
+                        "Created: %s, Updated: %s, Errors: %s\nError: %s"
+                        % (total_created, total_updated, total_errors,
+                           str(exc)[:500])
+                    ),
+                })
+                self.env.cr.commit()
+            except Exception:
+                _logger.exception(
+                    "Failed to write detail sync error status for %s",
+                    rec.name,
+                )
+
+    def _extract_detail_items(self, payload):
+        """Resolve detail_data_root_key (dot-notation) and return
+        (parent_context_dict, items_list).
+
+        For ``detail_data_root_key = 'order.products'`` and payload::
+
+            {"order": {"id": 1, "products": [...]}}
+
+        Returns ``({"id": 1, "products": [...]}, [...])``
+        so the mapping can reference both ``parent:id`` and item fields.
+        """
+        root_key = (self.detail_data_root_key or '').strip()
+        if not root_key:
+            # No root key – payload IS the list (or wraps it)
+            if isinstance(payload, list):
+                return {}, payload
+            if isinstance(payload, dict):
+                for key in ('data', 'items', 'products', 'results'):
+                    val = payload.get(key)
+                    if isinstance(val, list):
+                        return payload, val
+            return payload if isinstance(payload, dict) else {}, []
+
+        parts = root_key.split('.')
+        # Navigate to the PARENT of the items list
+        context = payload
+        for part in parts[:-1]:
+            if isinstance(context, dict):
+                context = context.get(part, {})
+            else:
+                return {}, []
+        parent_context = context if isinstance(context, dict) else {}
+
+        # Get the items list from the last key
+        items = []
+        last_part = parts[-1]
+        if isinstance(parent_context, dict):
+            val = parent_context.get(last_part)
+            if isinstance(val, list):
+                items = val
+        return parent_context, items
+
+    def _upsert_detail_items(self, items, parent_context, mapping,
+                             detail_model, detail_fields):
+        """Map, dedup, and upsert a list of detail items.
+        Returns (created, updated, errors)."""
+        created = 0
+        updated = 0
+        errors = 0
+        unique_field = (self.detail_unique_field or '').strip()
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            values = self._map_detail_item(
+                item, parent_context, mapping, detail_fields,
+            )
+            if not values:
+                continue
+
+            # Upsert logic
+            if unique_field and unique_field in values:
+                unique_val = values.get(unique_field)
+                if unique_val:
+                    existing = detail_model.search(
+                        [(unique_field, '=', unique_val)], limit=1,
+                    )
+                    if existing:
+                        try:
+                            with self.env.cr.savepoint():
+                                existing.write(values)
+                                updated += 1
+                        except Exception as e:
+                            errors += 1
+                            _logger.warning(
+                                "Detail update error: %s", str(e)[:200],
+                            )
+                        continue
+
+            # Create
+            try:
+                with self.env.cr.savepoint():
+                    detail_model.create([values])
+                    created += 1
+            except Exception as e:
+                errors += 1
+                _logger.warning(
+                    "Detail create error: %s", str(e)[:200],
+                )
+
+        return created, updated, errors
+
+    def _map_detail_item(self, item, parent_context, mapping, detail_fields):
+        """Map a single detail item dict to Odoo field values.
+
+        Supports:
+          - ``"field": "source_key"``       – from the item dict
+          - ``"field": "parent:key"``        – from parent_context
+          - ``"field": "parent:nested.key"`` – dot-notation on parent
+          - ``"field": "a.b.c"``             – dot-notation on the item
+          - ``"field": {"const": "value"}``  – static constant
+          - ``"field": "const:value"``        – static constant shorthand
+        """
+        values = {}
+        for target_field, source_key in mapping.items():
+            if target_field not in detail_fields:
+                continue
+            raw_val = None
+            if isinstance(source_key, dict) and 'const' in source_key:
+                raw_val = source_key['const']
+            elif isinstance(source_key, str) and source_key.startswith('const:'):
+                raw_val = source_key.split('const:', 1)[1]
+            elif isinstance(source_key, str) and source_key.startswith('parent:'):
+                parent_key = source_key.split('parent:', 1)[1]
+                if '.' in parent_key:
+                    raw_val = self._resolve_dotted_key(
+                        parent_context, parent_key,
+                    )
+                else:
+                    raw_val = parent_context.get(parent_key)
+            elif isinstance(source_key, str) and '.' in source_key:
+                raw_val = self._resolve_dotted_key(item, source_key)
+            elif isinstance(source_key, str):
+                raw_val = item.get(source_key)
+            if raw_val is not None:
+                values[target_field] = self._coerce_value(
+                    target_field, raw_val, detail_fields,
+                )
+        return values
 
     # ------------------------------------------------------------------
     #  Public button – launches sync in a background thread so the UI

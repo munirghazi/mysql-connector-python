@@ -22,6 +22,10 @@
             <form string="API Source">
                 <header>
                     <button name="action_sync" type="object" string="Sync Now" class="btn-primary"/>
+                    <button name="action_sync_details" type="object"
+                            string="Sync Order Details"
+                            class="btn-secondary"
+                            invisible="not detail_sync_enabled"/>
                 </header>
                 <sheet>
                     <group>
@@ -62,6 +66,29 @@
                         <field name="pagination_start" invisible="not enable_pagination"/>
                         <field name="pagination_zero_based" invisible="not enable_pagination"/>
                         <field name="page_size" invisible="not enable_pagination"/>
+                    </group>
+                    <separator string="Detail Sync (per-record child fetching)"/>
+                    <group>
+                        <field name="detail_sync_enabled" widget="boolean_toggle"/>
+                    </group>
+                    <group string="Detail Configuration" invisible="not detail_sync_enabled">
+                        <field name="detail_url_pattern"
+                               placeholder="https://api.zid.sa/v1/managers/store/orders/{id}/view"/>
+                        <field name="detail_parent_id_field" placeholder="order_id"/>
+                        <field name="detail_parent_domain" widget="text"
+                               placeholder='[["store_id","=","1170879"]]'/>
+                        <field name="detail_data_root_key" placeholder="order.products"/>
+                        <field name="detail_target_model_id"/>
+                        <field name="detail_unique_field" placeholder="order_detail_uuid"/>
+                        <field name="detail_mapping_json" widget="text"
+                               placeholder='{"order_linked_id":"parent:id","product_name":"name","product_sku":"sku","total":"total"}'/>
+                        <field name="detail_request_delay"/>
+                    </group>
+                    <group string="Detail Sync Status" invisible="not detail_sync_enabled">
+                        <field name="detail_last_sync_at" readonly="1"/>
+                        <field name="detail_last_sync_status" readonly="1"/>
+                        <field name="detail_last_sync_count" readonly="1"/>
+                        <field name="detail_last_sync_message" readonly="1"/>
                     </group>
                     <group string="Dump Raw JSON">
                         <field name="dump_json"/>
