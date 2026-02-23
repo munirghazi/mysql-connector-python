@@ -70,7 +70,8 @@
                         <field name="enable_pagination"/>
                         <field name="pagination_start" invisible="not enable_pagination"/>
                         <field name="pagination_zero_based" invisible="not enable_pagination"/>
-                        <field name="page_size" invisible="not enable_pagination"/>
+                                <field name="page_size" invisible="not enable_pagination"/>
+                                <field name="page_request_delay" invisible="not enable_pagination"/>
                     </group>
                     <separator string="Detail Sync (per-record child fetching)"/>
                     <group>

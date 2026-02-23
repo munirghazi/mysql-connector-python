@@ -72,6 +72,11 @@ class MysdbApiSource(models.Model):
     pagination_start = fields.Integer(string='Start Page', default=1)
     pagination_zero_based = fields.Boolean(string='Zero-based Page Index', default=False)
     page_size = fields.Integer(string='Page Size', default=50)
+    page_request_delay = fields.Float(
+        string='Page Request Delay (sec)', default=0,
+        help="Seconds to wait between page requests (rate limiting). "
+             "Set to 1-2 for APIs with rate limits like Zid."
+    )
     connect_timeout = fields.Integer(string='Connect Timeout (sec)', default=20)
     request_timeout = fields.Integer(string='Request Timeout (sec)', default=60)
     active = fields.Boolean(default=True)
@@ -249,25 +254,38 @@ class MysdbApiSource(models.Model):
         )
         req = urllib.request.Request(url, headers=headers)
         timeout = self.request_timeout or self.connect_timeout or 20
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                raw = resp.read()
-                status = resp.status
-                content_type = resp.headers.get('Content-Type', '')
-        except urllib.error.HTTPError as exc:
+        max_retries = 3
+        for attempt in range(max_retries + 1):
             try:
-                error_body = exc.read().decode('utf-8', errors='ignore')[:2000]
-            except Exception:
-                error_body = ''
-            raise ValidationError(
-                _("HTTP Error %s: %s\nURL: %s\nResponse: %s") % (
-                    exc.code, exc.reason, url, error_body
+                req = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    raw = resp.read()
+                    status = resp.status
+                    content_type = resp.headers.get('Content-Type', '')
+                break  # success
+            except urllib.error.HTTPError as exc:
+                if exc.code == 429 and attempt < max_retries:
+                    # Rate limited – back off and retry
+                    retry_after = int(exc.headers.get('Retry-After', 0)) or (5 * (attempt + 1))
+                    _logger.warning(
+                        "API rate limited (429): source=%s url=%s retry_after=%ss attempt=%s/%s",
+                        self.name, url, retry_after, attempt + 1, max_retries,
+                    )
+                    time.sleep(retry_after)
+                    continue
+                try:
+                    error_body = exc.read().decode('utf-8', errors='ignore')[:2000]
+                except Exception:
+                    error_body = ''
+                raise ValidationError(
+                    _("HTTP Error %s: %s\nURL: %s\nResponse: %s") % (
+                        exc.code, exc.reason, url, error_body
+                    )
                 )
-            )
-        except urllib.error.URLError as exc:
-            raise ValidationError(
-                _("Connection error: %s\nURL: %s") % (str(exc.reason), url)
-            )
+            except urllib.error.URLError as exc:
+                raise ValidationError(
+                    _("Connection error: %s\nURL: %s") % (str(exc.reason), url)
+                )
         _logger.info(
             "API response: status=%s content_type=%s size=%s bytes",
             status, content_type, len(raw),
@@ -1355,6 +1373,10 @@ class MysdbApiSource(models.Model):
                 else:
                     empty_pages = 0
                 page += 1
+
+                # Rate limiting: wait between page requests
+                if rec.page_request_delay and rec.page_request_delay > 0:
+                    time.sleep(rec.page_request_delay)
 
             msg = "Done – Created: %s, Updated: %s (pages: %s)" % (
                 total_created, total_updated, page,
