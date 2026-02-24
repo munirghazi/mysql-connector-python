@@ -1524,14 +1524,35 @@ class MysdbApiSource(models.Model):
 
     @api.model
     def cron_auto_sync_all(self):
-        """Called by scheduled action to sync all API sources with auto_sync=True."""
+        """Called by scheduled action to sync all API sources with auto_sync=True.
+
+        For each source:
+        1. Sync main records (orders / products / etc.)
+        2. If detail_sync_enabled, also sync child records (order details)
+        """
         sources = self.search([('auto_sync', '=', True), ('active', '=', True)])
         for src in sources:
+            # --- Step 1: main sync ---
             try:
                 src._do_sync()
                 _logger.info("Auto-sync completed for API source: %s", src.name)
             except Exception as e:
                 _logger.error("Auto-sync failed for API source %s: %s", src.name, str(e))
+                continue  # skip detail sync if main sync crashed
+
+            # --- Step 2: detail sync (if enabled) ---
+            if src.detail_sync_enabled:
+                try:
+                    src._do_sync_details()
+                    _logger.info(
+                        "Auto detail-sync completed for API source: %s",
+                        src.name,
+                    )
+                except Exception as e:
+                    _logger.error(
+                        "Auto detail-sync failed for API source %s: %s",
+                        src.name, str(e),
+                    )
 
     def _dump_raw_json(self, raw, page):
         base_dir = (self.dump_directory or '').replace('\u00A0', ' ').strip().strip('"')
