@@ -8,7 +8,7 @@ import urllib.error
 import logging
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import odoo
 from odoo import api, fields, models, _
@@ -88,6 +88,19 @@ class MysdbApiSource(models.Model):
     auto_sync = fields.Boolean(
         string='Auto Sync', default=False,
         help='If enabled, this API source will be synced automatically by the system scheduler.'
+    )
+    auto_sync_interval = fields.Integer(
+        string='Sync Every', default=1,
+        help='How often to auto-sync this source.',
+    )
+    auto_sync_interval_type = fields.Selection([
+        ('minutes', 'Minutes'),
+        ('hours', 'Hours'),
+        ('days', 'Days'),
+    ], string='Interval Type', default='hours')
+    auto_sync_next_run = fields.Datetime(
+        string='Next Scheduled Run', readonly=True,
+        help='When this source will be synced next. Automatically calculated after each sync.',
     )
     sync_in_progress = fields.Boolean(
         string='Sync In Progress', default=False, readonly=True,
@@ -1576,22 +1589,54 @@ class MysdbApiSource(models.Model):
             except Exception:
                 _logger.exception("Failed to write sync log for API source %s", rec.name)
 
+    def _compute_next_run(self):
+        """Calculate the next auto-sync run time based on interval settings."""
+        now = fields.Datetime.now()
+        interval = self.auto_sync_interval or 1
+        interval_type = self.auto_sync_interval_type or 'hours'
+        if interval_type == 'minutes':
+            delta = timedelta(minutes=interval)
+        elif interval_type == 'days':
+            delta = timedelta(days=interval)
+        else:
+            delta = timedelta(hours=interval)
+        self.write({'auto_sync_next_run': now + delta})
+
     @api.model
     def cron_auto_sync_all(self):
-        """Called by scheduled action to sync all API sources with auto_sync=True.
+        """Called by scheduled action to sync API sources whose next_run is due.
 
         For each source:
-        1. Sync main records (orders / products / etc.)
-        2. If detail_sync_enabled, also sync child records (order details)
+        1. Check if it's time to run (next_run <= now, or next_run not set)
+        2. Sync main records (orders / products / etc.)
+        3. If detail_sync_enabled, also sync child records (order details)
+        4. Calculate next_run based on the source's interval settings
         """
-        sources = self.search([('auto_sync', '=', True), ('active', '=', True)])
+        now = fields.Datetime.now()
+        sources = self.search([
+            ('auto_sync', '=', True),
+            ('active', '=', True),
+            '|',
+            ('auto_sync_next_run', '=', False),
+            ('auto_sync_next_run', '<=', now),
+        ])
+        if not sources:
+            _logger.info("Auto-sync: no API sources due for sync at %s", now)
+            return
+
         for src in sources:
+            _logger.info(
+                "Auto-sync starting for API source: %s (next_run was %s)",
+                src.name, src.auto_sync_next_run,
+            )
             # --- Step 1: main sync ---
             try:
                 src._do_sync()
                 _logger.info("Auto-sync completed for API source: %s", src.name)
             except Exception as e:
                 _logger.error("Auto-sync failed for API source %s: %s", src.name, str(e))
+                src._compute_next_run()
+                self.env.cr.commit()
                 continue  # skip detail sync if main sync crashed
 
             # --- Step 2: detail sync (if enabled) ---
@@ -1607,6 +1652,10 @@ class MysdbApiSource(models.Model):
                         "Auto detail-sync failed for API source %s: %s",
                         src.name, str(e),
                     )
+
+            # --- Step 3: schedule next run ---
+            src._compute_next_run()
+            self.env.cr.commit()
 
     def _dump_raw_json(self, raw, page):
         base_dir = (self.dump_directory or '').replace('\u00A0', ' ').strip().strip('"')

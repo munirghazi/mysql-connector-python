@@ -44,6 +44,16 @@
                         <field name="auto_sync" widget="boolean_toggle"/>
                         <field name="sync_in_progress" invisible="1"/>
                         <field name="sync_started_at" invisible="1"/>
+                    </group>
+                    <group string="Auto Sync Schedule" invisible="not auto_sync">
+                        <div class="d-flex align-items-center">
+                            <span class="me-2">Sync Every</span>
+                            <field name="auto_sync_interval" class="oe_inline" style="width: 60px;"/>
+                            <field name="auto_sync_interval_type" class="oe_inline ms-2"/>
+                        </div>
+                        <field name="auto_sync_next_run"/>
+                    </group>
+                    <group>
                         <field name="company_id" options="{'no_create': True}" groups="base.group_multi_company"/>
                     </group>
                     <group string="Connection">
