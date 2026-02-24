@@ -89,6 +89,14 @@ class MysdbApiSource(models.Model):
         string='Auto Sync', default=False,
         help='If enabled, this API source will be synced automatically by the system scheduler.'
     )
+    sync_in_progress = fields.Boolean(
+        string='Sync In Progress', default=False, readonly=True,
+        help='Indicates a sync is currently running. Prevents concurrent syncs.'
+    )
+    sync_started_at = fields.Datetime(
+        string='Sync Started At', readonly=True,
+        help='When the current sync started. Used for stale-lock detection.'
+    )
 
     filter_date_from = fields.Datetime(string='Filter Date From')
     filter_date_to = fields.Datetime(string='Filter Date To')
@@ -1308,15 +1316,38 @@ class MysdbApiSource(models.Model):
     #  Public button – launches sync in a background thread so the UI
     #  does not block / timeout.
     # ------------------------------------------------------------------
+    def action_clear_sync_lock(self):
+        """Manually clear a stale sync lock."""
+        self.write({'sync_in_progress': False, 'sync_started_at': False})
+        return True
+
     def action_sync(self):
         """Start sync in a background thread and return immediately."""
         for rec in self:
+            # Prevent concurrent syncs
+            if rec.sync_in_progress:
+                # Auto-clear stale locks older than 2 hours
+                if rec.sync_started_at and \
+                   (fields.Datetime.now() - rec.sync_started_at).total_seconds() > 7200:
+                    _logger.warning(
+                        "Clearing stale sync lock for %s (started %s)",
+                        rec.name, rec.sync_started_at,
+                    )
+                    rec.write({'sync_in_progress': False, 'sync_started_at': False})
+                else:
+                    raise ValidationError(
+                        _("Sync is already running for '%s'. "
+                          "If you believe this is stuck, use the 'Clear Sync Lock' button.")
+                        % rec.name
+                    )
             rec.write({
                 'last_sync_at': fields.Datetime.now(),
                 'last_sync_status': 'ok',
                 'last_sync_message': 'Sync started – running in background…',
                 'last_sync_count': 0,
                 'last_sync_page': 0,
+                'sync_in_progress': True,
+                'sync_started_at': fields.Datetime.now(),
             })
         self.env.cr.commit()
 
@@ -1368,6 +1399,25 @@ class MysdbApiSource(models.Model):
         total_created = 0
         total_updated = 0
         page = rec.pagination_start if rec.pagination_start is not None else 1
+
+        # ---- concurrency guard ----
+        if rec.sync_in_progress:
+            # Auto-clear stale locks older than 2 hours
+            if rec.sync_started_at and \
+               (fields.Datetime.now() - rec.sync_started_at).total_seconds() > 7200:
+                _logger.warning(
+                    "Clearing stale sync lock for %s (started %s)",
+                    rec.name, rec.sync_started_at,
+                )
+            else:
+                _logger.warning(
+                    "Skipping sync for %s – already in progress since %s",
+                    rec.name, rec.sync_started_at,
+                )
+                return
+        rec.write({'sync_in_progress': True, 'sync_started_at': fields.Datetime.now()})
+        self.env.cr.commit()
+
         try:
             _logger.info(
                 "API Sync start: source=%s model=%s pagination=%s start_page=%s page_size=%s",
@@ -1483,6 +1533,8 @@ class MysdbApiSource(models.Model):
                 'last_sync_message': msg,
                 'last_sync_count': total_created + total_updated,
                 'last_sync_page': page,
+                'sync_in_progress': False,
+                'sync_started_at': False,
             })
             self.env.cr.commit()
             self.env['mysdb.sync.log'].sudo().create({
@@ -1506,6 +1558,8 @@ class MysdbApiSource(models.Model):
                         % (total_created, total_updated, page, str(exc)[:500])
                     ),
                     'last_sync_count': total_created + total_updated,
+                    'sync_in_progress': False,
+                    'sync_started_at': False,
                 })
                 self.env.cr.commit()
             except Exception:

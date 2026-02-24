@@ -21,7 +21,12 @@
         <field name="arch" type="xml">
             <form string="API Source">
                 <header>
-                    <button name="action_sync" type="object" string="Sync Now" class="btn-primary"/>
+                    <button name="action_sync" type="object" string="Sync Now" class="btn-primary"
+                            invisible="sync_in_progress"/>
+                    <button name="action_clear_sync_lock" type="object"
+                            string="Clear Sync Lock" class="btn-warning"
+                            invisible="not sync_in_progress"
+                            confirm="This will clear the sync lock. Only use if the sync is stuck. Continue?"/>
                     <button name="action_sync_details" type="object"
                             string="Sync Order Details"
                             class="btn-secondary"
@@ -37,6 +42,8 @@
                         <field name="name"/>
                         <field name="active"/>
                         <field name="auto_sync" widget="boolean_toggle"/>
+                        <field name="sync_in_progress" invisible="1"/>
+                        <field name="sync_started_at" invisible="1"/>
                         <field name="company_id" options="{'no_create': True}" groups="base.group_multi_company"/>
                     </group>
                     <group string="Connection">
