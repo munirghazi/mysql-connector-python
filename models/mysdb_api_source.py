@@ -1398,38 +1398,67 @@ class MysdbApiSource(models.Model):
                 env = odoo.api.Environment(cr, uid, {})
                 sources = env['mysdb.api.source'].browse(rec_ids).exists()
                 for rec in sources:
-                    rec._do_sync()
+                    try:
+                        rec._do_sync()
+                    finally:
+                        rec._release_sync_lock()
                 cr.commit()
         except Exception:
             _logger.exception("Background API sync thread crashed (ids=%s)", rec_ids)
+            # Try to release lock even on crash
+            try:
+                registry = odoo.registry(dbname)
+                with registry.cursor() as cr:
+                    env = odoo.api.Environment(cr, uid, {})
+                    sources = env['mysdb.api.source'].browse(rec_ids).exists()
+                    for rec in sources:
+                        rec.write({'sync_in_progress': False, 'sync_started_at': False})
+                    cr.commit()
+            except Exception:
+                _logger.exception("Failed to release sync lock after crash (ids=%s)", rec_ids)
 
     # ------------------------------------------------------------------
     #  Core sync logic (runs inside a dedicated cursor)
     # ------------------------------------------------------------------
+    def _acquire_sync_lock(self):
+        """Try to acquire sync lock. Returns True if acquired, False if already locked."""
+        self.env.cr.execute(
+            "SELECT sync_in_progress, sync_started_at FROM mysdb_api_source WHERE id = %s FOR UPDATE NOWAIT",
+            (self.id,)
+        )
+        row = self.env.cr.fetchone()
+        if row and row[0]:  # sync_in_progress is True
+            started = row[1]
+            if started and (fields.Datetime.now() - started).total_seconds() > 7200:
+                _logger.warning(
+                    "Clearing stale sync lock for %s (started %s)",
+                    self.name, started,
+                )
+                # Fall through to acquire the lock
+            else:
+                _logger.warning(
+                    "Skipping sync for %s – already in progress since %s",
+                    self.name, started,
+                )
+                return False
+        self.write({'sync_in_progress': True, 'sync_started_at': fields.Datetime.now()})
+        self.env.cr.commit()
+        return True
+
+    def _release_sync_lock(self):
+        """Release the sync lock."""
+        try:
+            self.write({'sync_in_progress': False, 'sync_started_at': False})
+            self.env.cr.commit()
+        except Exception:
+            _logger.exception("Failed to release sync lock for %s", self.name)
+
     def _do_sync(self):
         """Perform full sync for a single API source record."""
         rec = self
         total_created = 0
         total_updated = 0
         page = rec.pagination_start if rec.pagination_start is not None else 1
-
-        # ---- concurrency guard ----
-        if rec.sync_in_progress:
-            # Auto-clear stale locks older than 2 hours
-            if rec.sync_started_at and \
-               (fields.Datetime.now() - rec.sync_started_at).total_seconds() > 7200:
-                _logger.warning(
-                    "Clearing stale sync lock for %s (started %s)",
-                    rec.name, rec.sync_started_at,
-                )
-            else:
-                _logger.warning(
-                    "Skipping sync for %s – already in progress since %s",
-                    rec.name, rec.sync_started_at,
-                )
-                return
-        rec.write({'sync_in_progress': True, 'sync_started_at': fields.Datetime.now()})
-        self.env.cr.commit()
 
         try:
             _logger.info(
@@ -1629,33 +1658,51 @@ class MysdbApiSource(models.Model):
                 "Auto-sync starting for API source: %s (next_run was %s)",
                 src.name, src.auto_sync_next_run,
             )
-            # --- Step 1: main sync ---
+
+            # --- Acquire lock (skip if already running) ---
             try:
-                src._do_sync()
-                _logger.info("Auto-sync completed for API source: %s", src.name)
-            except Exception as e:
-                _logger.error("Auto-sync failed for API source %s: %s", src.name, str(e))
-                src._compute_next_run()
-                self.env.cr.commit()
-                continue  # skip detail sync if main sync crashed
+                if not src._acquire_sync_lock():
+                    _logger.info("Auto-sync skipped for %s – already in progress", src.name)
+                    continue
+            except Exception:
+                _logger.warning("Auto-sync could not acquire lock for %s", src.name)
+                continue
 
-            # --- Step 2: detail sync (if enabled) ---
-            if src.detail_sync_enabled:
+            try:
+                # --- Step 1: main sync ---
                 try:
-                    src._do_sync_details()
-                    _logger.info(
-                        "Auto detail-sync completed for API source: %s",
-                        src.name,
-                    )
+                    src._do_sync()
+                    _logger.info("Auto-sync completed for API source: %s", src.name)
                 except Exception as e:
-                    _logger.error(
-                        "Auto detail-sync failed for API source %s: %s",
-                        src.name, str(e),
-                    )
+                    _logger.error("Auto-sync failed for API source %s: %s", src.name, str(e))
+                    src._compute_next_run()
+                    src._release_sync_lock()
+                    self.env.cr.commit()
+                    continue  # skip detail sync if main sync crashed
 
-            # --- Step 3: schedule next run ---
-            src._compute_next_run()
-            self.env.cr.commit()
+                # --- Step 2: detail sync (if enabled) ---
+                if src.detail_sync_enabled:
+                    try:
+                        src._do_sync_details()
+                        _logger.info(
+                            "Auto detail-sync completed for API source: %s",
+                            src.name,
+                        )
+                    except Exception as e:
+                        _logger.error(
+                            "Auto detail-sync failed for API source %s: %s",
+                            src.name, str(e),
+                        )
+
+                # --- Step 3: schedule next run & release lock ---
+                src._compute_next_run()
+                src._release_sync_lock()
+                self.env.cr.commit()
+
+            except Exception as e:
+                _logger.exception("Auto-sync unexpected error for %s: %s", src.name, str(e))
+                src._release_sync_lock()
+                self.env.cr.commit()
 
     def _dump_raw_json(self, raw, page):
         base_dir = (self.dump_directory or '').replace('\u00A0', ' ').strip().strip('"')
