@@ -1411,21 +1411,56 @@ class MysdbApiSource(models.Model):
                     try:
                         rec._do_sync()
                     finally:
-                        rec._release_sync_lock()
+                        # Only release lock if cursor is still alive
+                        if not rec._is_cursor_dead():
+                            rec._release_sync_lock()
+                if not cls._check_cursor_dead(cr):
+                    cr.commit()
+        except Exception as e:
+            _logger.exception("Background API sync thread crashed (ids=%s)", rec_ids)
+            # Release lock & write status with a FRESH cursor
+            cls._cleanup_after_crash(dbname, uid, rec_ids, e)
+
+    @classmethod
+    def _cleanup_after_crash(cls, dbname, uid, rec_ids, error):
+        """Open a fresh cursor to release lock and write status after a crash."""
+        try:
+            registry = odoo.registry(dbname)
+            with registry.cursor() as cr:
+                env = odoo.api.Environment(cr, uid, {})
+                sources = env['mysdb.api.source'].browse(rec_ids).exists()
+                for rec in sources:
+                    rec.write({
+                        'sync_in_progress': False,
+                        'sync_started_at': False,
+                        'last_sync_status': 'error',
+                        'last_sync_message': (
+                            "Sync interrupted (connection/cursor lost at page %s). "
+                            "Data committed up to the previous page is safe. "
+                            "Error: %s"
+                            % (rec.last_sync_page or '?', str(error)[:300])
+                        ),
+                    })
                 cr.commit()
         except Exception:
-            _logger.exception("Background API sync thread crashed (ids=%s)", rec_ids)
-            # Try to release lock even on crash
-            try:
-                registry = odoo.registry(dbname)
-                with registry.cursor() as cr:
-                    env = odoo.api.Environment(cr, uid, {})
-                    sources = env['mysdb.api.source'].browse(rec_ids).exists()
-                    for rec in sources:
-                        rec.write({'sync_in_progress': False, 'sync_started_at': False})
-                    cr.commit()
-            except Exception:
-                _logger.exception("Failed to release sync lock after crash (ids=%s)", rec_ids)
+            _logger.exception("Failed to release sync lock after crash (ids=%s)", rec_ids)
+
+    @staticmethod
+    def _check_cursor_dead(cr):
+        """Check if a raw cursor is dead (closed/unusable)."""
+        try:
+            cr.execute("SELECT 1")
+            return False
+        except Exception:
+            return True
+
+    def _is_cursor_dead(self):
+        """Check if self.env.cr is dead (closed/unusable)."""
+        try:
+            self.env.cr.execute("SELECT 1")
+            return False
+        except Exception:
+            return True
 
     # ------------------------------------------------------------------
     #  Core sync logic (runs inside a dedicated cursor)
@@ -1547,7 +1582,10 @@ class MysdbApiSource(models.Model):
                         "API Sync page %s upsert error (recovering): %s",
                         page, str(page_err)[:300],
                     )
-                    # Transaction is safe thanks to savepoint – continue
+                    # If cursor is dead, stop immediately
+                    if self._is_cursor_dead():
+                        _logger.warning("Cursor died at page %s, stopping sync", page)
+                        break
 
                 # ----------------------------------------------------------
                 # Commit upserted DATA first (separate from progress write).
@@ -1561,6 +1599,12 @@ class MysdbApiSource(models.Model):
                         "API Sync page %s data commit failed (recovering): %s",
                         page, str(data_commit_err)[:200],
                     )
+                    # If cursor/connection is dead, stop the sync immediately.
+                    # No point in trying more pages – the caller will handle
+                    # lock release & status with a fresh cursor.
+                    if self._is_cursor_dead():
+                        _logger.warning("Cursor died at page %s, stopping sync", page)
+                        break
                     try:
                         self.env.cr.rollback()
                     except Exception:
@@ -1571,27 +1615,31 @@ class MysdbApiSource(models.Model):
                 # If this fails (e.g. concurrent update), we just skip it and
                 # continue to the next page.
                 # ----------------------------------------------------------
-                try:
-                    rec.write({
-                        'last_sync_page': page,
-                        'last_sync_page_items': len(items),
-                        'last_sync_page_created': page_created,
-                        'last_sync_page_updated': page_updated,
-                        'last_sync_message': (
-                            "Running… page %s | created %s | updated %s"
-                            % (page, total_created, total_updated)
-                        ),
-                    })
-                    self.env.cr.commit()
-                except Exception:
-                    _logger.debug(
-                        "Progress write failed for page %s (concurrent update?), continuing",
-                        page,
-                    )
+                if not self._is_cursor_dead():
                     try:
-                        self.env.cr.rollback()
+                        rec.write({
+                            'last_sync_page': page,
+                            'last_sync_page_items': len(items),
+                            'last_sync_page_created': page_created,
+                            'last_sync_page_updated': page_updated,
+                            'last_sync_message': (
+                                "Running… page %s | created %s | updated %s"
+                                % (page, total_created, total_updated)
+                            ),
+                        })
+                        self.env.cr.commit()
                     except Exception:
-                        pass
+                        _logger.debug(
+                            "Progress write failed for page %s (concurrent update?), continuing",
+                            page,
+                        )
+                        if self._is_cursor_dead():
+                            _logger.warning("Cursor died at page %s during progress write, stopping", page)
+                            break
+                        try:
+                            self.env.cr.rollback()
+                        except Exception:
+                            pass
 
                 _logger.info(
                     "API Sync page done: source=%s page=%s items=%s created=%s updated=%s running_total=%s",
@@ -1627,6 +1675,12 @@ class MysdbApiSource(models.Model):
             )
             # Write final status. Lock release is handled by the CALLER
             # (_sync_in_background / cron_auto_sync_all), not here.
+            if self._is_cursor_dead():
+                _logger.info(
+                    "API Sync completed page loop but cursor is dead, skipping final status write: %s",
+                    msg,
+                )
+                return
             try:
                 rec.write({
                     'last_sync_at': fields.Datetime.now(),
@@ -1641,6 +1695,8 @@ class MysdbApiSource(models.Model):
                     "Final status write failed for %s (concurrent update?), retrying after rollback",
                     rec.name,
                 )
+                if self._is_cursor_dead():
+                    return
                 try:
                     self.env.cr.rollback()
                     rec.write({
@@ -1674,6 +1730,14 @@ class MysdbApiSource(models.Model):
 
         except Exception as exc:
             _logger.exception("API Sync failed: source=%s error=%s", rec.name, str(exc))
+            # If cursor is dead, skip all writes – the caller (_sync_in_background
+            # or cron_auto_sync_all) will handle status/lock with a fresh cursor.
+            if self._is_cursor_dead():
+                _logger.warning(
+                    "Cursor is dead, skipping status write for %s (caller will handle)",
+                    rec.name,
+                )
+                return
             # Write error status. Lock release is handled by the CALLER.
             try:
                 self.env.cr.rollback()
@@ -1766,6 +1830,9 @@ class MysdbApiSource(models.Model):
                     _logger.info("Auto-sync completed for API source: %s", src.name)
                 except Exception as e:
                     _logger.error("Auto-sync failed for API source %s: %s", src.name, str(e))
+                    if self._is_cursor_dead():
+                        _logger.warning("Auto-sync cursor died for %s, aborting remaining sources", src.name)
+                        return
                     src._compute_next_run()
                     src._release_sync_lock()
                     self.env.cr.commit()
@@ -1786,14 +1853,19 @@ class MysdbApiSource(models.Model):
                         )
 
                 # --- Step 3: schedule next run & release lock ---
-                src._compute_next_run()
-                src._release_sync_lock()
-                self.env.cr.commit()
+                if not self._is_cursor_dead():
+                    src._compute_next_run()
+                    src._release_sync_lock()
+                    self.env.cr.commit()
+                else:
+                    _logger.warning("Auto-sync cursor died for %s after sync", src.name)
+                    return
 
             except Exception as e:
                 _logger.exception("Auto-sync unexpected error for %s: %s", src.name, str(e))
-                src._release_sync_lock()
-                self.env.cr.commit()
+                if not self._is_cursor_dead():
+                    src._release_sync_lock()
+                    self.env.cr.commit()
 
     # ------------------------------------------------------------------
     #  Deduplicate – remove duplicate records based on unique field
