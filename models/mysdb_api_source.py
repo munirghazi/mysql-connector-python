@@ -385,6 +385,93 @@ class MysdbApiSource(models.Model):
             ]
         return items
 
+    @staticmethod
+    def _extract_pagination_meta(payload):
+        """Extract total-page / total-record counts from API response metadata.
+
+        Common API patterns looked for (in order):
+          • top-level: last_page, lastPage, total_pages, totalPages, pageCount
+          • nested:    pagination.last_page, pagination.totalPages, meta.last_page
+          • counts:    total, count, totalCount  (used to estimate total pages)
+        Returns (total_pages, total_records) — either may be None.
+        """
+        if not isinstance(payload, dict):
+            return None, None
+
+        total_pages = None
+        total_records = None
+
+        # --- Direct page-count keys ---
+        for key in ('last_page', 'lastPage', 'total_pages', 'totalPages',
+                     'pageCount', 'page_count', 'pages', 'numberOfPages'):
+            val = payload.get(key)
+            if val is not None:
+                try:
+                    total_pages = int(val)
+                    break
+                except (ValueError, TypeError):
+                    pass
+
+        # --- Nested in 'pagination' or 'meta' ---
+        if total_pages is None:
+            for wrapper_key in ('pagination', 'meta', 'paging', 'paginator'):
+                wrapper = payload.get(wrapper_key)
+                if isinstance(wrapper, dict):
+                    for key in ('last_page', 'lastPage', 'total_pages',
+                                'totalPages', 'pageCount', 'page_count'):
+                        val = wrapper.get(key)
+                        if val is not None:
+                            try:
+                                total_pages = int(val)
+                                break
+                            except (ValueError, TypeError):
+                                pass
+                if total_pages is not None:
+                    break
+
+        # --- Total record count ---
+        for key in ('total', 'count', 'totalCount', 'total_count',
+                     'totalRecords', 'total_records'):
+            val = payload.get(key)
+            if val is not None:
+                try:
+                    total_records = int(val)
+                    break
+                except (ValueError, TypeError):
+                    pass
+        if total_records is None:
+            for wrapper_key in ('pagination', 'meta', 'paging', 'paginator'):
+                wrapper = payload.get(wrapper_key)
+                if isinstance(wrapper, dict):
+                    for key in ('total', 'count', 'totalCount', 'total_count'):
+                        val = wrapper.get(key)
+                        if val is not None:
+                            try:
+                                total_records = int(val)
+                                break
+                            except (ValueError, TypeError):
+                                pass
+                if total_records is not None:
+                    break
+
+        return total_pages, total_records
+
+    @staticmethod
+    def _format_eta(seconds):
+        """Format seconds into a human-readable duration string."""
+        if seconds is None or seconds < 0:
+            return "unknown"
+        seconds = int(seconds)
+        if seconds < 60:
+            return f"{seconds}s"
+        minutes = seconds // 60
+        secs = seconds % 60
+        if minutes < 60:
+            return f"{minutes}m {secs:02d}s"
+        hours = minutes // 60
+        mins = minutes % 60
+        return f"{hours}h {mins:02d}m"
+
     def _map_item_to_values(self, item, model_fields):
         values = {}
         mapping = self.mapping_json or {}
@@ -1529,6 +1616,7 @@ class MysdbApiSource(models.Model):
         total_created = 0
         total_updated = 0
         page = rec.pagination_start if rec.pagination_start is not None else 1
+        start_page = page
 
         try:
             _logger.info(
@@ -1541,6 +1629,8 @@ class MysdbApiSource(models.Model):
             )
             empty_pages = 0
             prev_page_ids = set()  # for loop detection
+            sync_start_time = time.time()
+            estimated_total_pages = None  # discovered from API response
 
             while True:
                 url = rec._build_request_url(page=page)
@@ -1549,6 +1639,22 @@ class MysdbApiSource(models.Model):
                 if rec.dump_json:
                     rec._dump_raw_json(raw, page)
                 items = rec._extract_items(payload)
+
+                # --- Discover total pages from API response (first page or whenever available) ---
+                if estimated_total_pages is None and isinstance(payload, dict):
+                    api_total_pages, api_total_records = self._extract_pagination_meta(payload)
+                    if api_total_pages and api_total_pages > 0:
+                        estimated_total_pages = api_total_pages
+                        _logger.info(
+                            "API Sync discovered total_pages=%s for source=%s",
+                            estimated_total_pages, rec.name,
+                        )
+                    elif api_total_records and api_total_records > 0 and rec.page_size:
+                        estimated_total_pages = -(-api_total_records // rec.page_size)  # ceil division
+                        _logger.info(
+                            "API Sync estimated total_pages=%s from total_records=%s page_size=%s for source=%s",
+                            estimated_total_pages, api_total_records, rec.page_size, rec.name,
+                        )
 
                 # --- Loop / duplicate-page detection ---
                 # Build a fingerprint set from the IDs in this page.
@@ -1616,16 +1722,43 @@ class MysdbApiSource(models.Model):
                 # continue to the next page.
                 # ----------------------------------------------------------
                 if not self._is_cursor_dead():
+                    # --- Build progress message with ETA ---
+                    pages_done = page - start_page + 1
+                    elapsed = time.time() - sync_start_time
+                    avg_per_page = elapsed / pages_done if pages_done > 0 else 0
+
+                    if estimated_total_pages and estimated_total_pages > 0:
+                        pages_remaining = max(0, estimated_total_pages - page)
+                        eta_seconds = pages_remaining * avg_per_page
+                        progress_pct = min(100, int(page / estimated_total_pages * 100))
+                        progress_msg = (
+                            "Running… page %s/%s (%s%%) | created %s | updated %s | "
+                            "elapsed %s | ETA %s"
+                            % (
+                                page, estimated_total_pages, progress_pct,
+                                total_created, total_updated,
+                                self._format_eta(elapsed),
+                                self._format_eta(eta_seconds),
+                            )
+                        )
+                    else:
+                        progress_msg = (
+                            "Running… page %s | created %s | updated %s | "
+                            "elapsed %s | ~%s/page"
+                            % (
+                                page, total_created, total_updated,
+                                self._format_eta(elapsed),
+                                self._format_eta(avg_per_page),
+                            )
+                        )
+
                     try:
                         rec.write({
                             'last_sync_page': page,
                             'last_sync_page_items': len(items),
                             'last_sync_page_created': page_created,
                             'last_sync_page_updated': page_updated,
-                            'last_sync_message': (
-                                "Running… page %s | created %s | updated %s"
-                                % (page, total_created, total_updated)
-                            ),
+                            'last_sync_message': progress_msg,
                         })
                         self.env.cr.commit()
                     except Exception:
@@ -1670,8 +1803,10 @@ class MysdbApiSource(models.Model):
                 if rec.page_request_delay and rec.page_request_delay > 0:
                     time.sleep(rec.page_request_delay)
 
-            msg = "Done – Created: %s, Updated: %s (pages: %s)" % (
+            total_elapsed = time.time() - sync_start_time
+            msg = "Done – Created: %s, Updated: %s (pages: %s) in %s" % (
                 total_created, total_updated, page,
+                self._format_eta(total_elapsed),
             )
             # Write final status. Lock release is handled by the CALLER
             # (_sync_in_background / cron_auto_sync_all), not here.
