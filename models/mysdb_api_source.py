@@ -964,16 +964,64 @@ class MysdbApiSource(models.Model):
             # Fetch all parent records
             parents = parent_model.search(parent_domain, order='id asc')
             parent_list = []
+            missing_id_count = 0
             for p in parents:
                 pid = getattr(p, id_field, None)
                 if pid:
                     parent_list.append((str(pid), p))
+                else:
+                    missing_id_count += 1
 
             _logger.info(
-                "Detail sync start: source=%s parents=%s detail_model=%s id_field=%s",
-                rec.name, len(parent_list),
+                "Detail sync start: source=%s parents=%s (missing_id=%s) "
+                "detail_model=%s id_field=%s domain=%s",
+                rec.name, len(parent_list), missing_id_count,
                 rec.detail_target_model_id.model, id_field,
+                parent_domain or '[]',
             )
+
+            # --- Diagnostic: if 0 parents found, explain why ---
+            if not parent_list:
+                total_in_model = parent_model.search_count([])
+                diag_parts = []
+                if total_in_model == 0:
+                    diag_parts.append(
+                        "Target model %s has 0 records. "
+                        "Run the main sync first to populate orders."
+                        % rec.target_model_id.model
+                    )
+                else:
+                    diag_parts.append(
+                        "Target model %s has %s total records"
+                        % (rec.target_model_id.model, total_in_model)
+                    )
+                    if parent_domain:
+                        matched = parent_model.search_count(parent_domain)
+                        diag_parts.append(
+                            "but domain %s matches only %s"
+                            % (parent_domain, matched)
+                        )
+                    if missing_id_count > 0:
+                        diag_parts.append(
+                            "%s records have empty '%s' field"
+                            % (missing_id_count, id_field)
+                        )
+                    if not parent_domain and missing_id_count == 0:
+                        diag_parts.append(
+                            "but all %s records have empty '%s' field"
+                            % (total_in_model, id_field)
+                        )
+
+                diag_msg = "No parent records found for detail sync. " + "; ".join(diag_parts)
+                _logger.warning("Detail sync diagnostic: %s", diag_msg)
+                rec.write({
+                    'detail_last_sync_at': fields.Datetime.now(),
+                    'detail_last_sync_status': 'error',
+                    'detail_last_sync_message': diag_msg,
+                    'detail_last_sync_count': 0,
+                })
+                self.env.cr.commit()
+                return
 
             # Identify parents that already have child records (skip them)
             already_synced = set()
@@ -1451,10 +1499,7 @@ class MysdbApiSource(models.Model):
                         % rec.name
                     )
             rec.write({
-                'last_sync_at': fields.Datetime.now(),
-                'last_sync_status': 'ok',
                 'last_sync_message': 'Sync started – running in background…',
-                'last_sync_count': 0,
                 'last_sync_page': 0,
                 'sync_in_progress': True,
                 'sync_started_at': fields.Datetime.now(),
