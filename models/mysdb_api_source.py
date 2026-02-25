@@ -1479,8 +1479,23 @@ class MysdbApiSource(models.Model):
         self.write({'sync_in_progress': False, 'sync_started_at': False})
         return True
 
+    def action_sync_full(self):
+        """Force a full re-sync from page 1, ignoring any resume point."""
+        for rec in self:
+            # Clear the error status so _do_sync won't try to resume
+            rec.write({
+                'last_sync_status': False,
+                'last_sync_page': 0,
+            })
+        return self.action_sync()
+
     def action_sync(self):
-        """Start sync in a background thread and return immediately."""
+        """Trigger sync via cron worker (reliable on Odoo.sh) and return immediately.
+
+        The sync runs in the cron worker process which has a much longer timeout
+        (typically 30+ minutes) compared to the HTTP worker (~2 min) that
+        background threads inherit.
+        """
         for rec in self:
             # Prevent concurrent syncs
             if rec.sync_in_progress:
@@ -1498,31 +1513,48 @@ class MysdbApiSource(models.Model):
                           "If you believe this is stuck, use the 'Clear Sync Lock' button.")
                         % rec.name
                     )
+            # Determine start page: resume from last interrupted page or start fresh
+            resume_page = 0
+            if rec.last_sync_status == 'error' and rec.last_sync_page > 0:
+                resume_page = rec.last_sync_page
             rec.write({
-                'last_sync_message': 'Sync started – running in background…',
-                'last_sync_page': 0,
+                'last_sync_message': (
+                    'Sync queued – will start shortly via cron worker…'
+                    + (' (resuming from page %s)' % resume_page if resume_page else '')
+                ),
                 'sync_in_progress': True,
                 'sync_started_at': fields.Datetime.now(),
             })
         self.env.cr.commit()
 
-        dbname = self.env.cr.dbname
-        uid = self.env.uid
-        rec_ids = self.ids
-
-        t = threading.Thread(
-            target=self._sync_in_background,
-            args=(dbname, uid, rec_ids),
-            daemon=True,
-        )
-        t.start()
+        # Trigger the API sync cron to run ASAP (runs in the cron worker process)
+        try:
+            cron = self.env.ref(
+                'my_sdb_reporting.ir_cron_auto_sync_api', raise_if_not_found=False
+            )
+            if cron:
+                cron.sudo()._trigger()
+                _logger.info("Triggered API sync cron for immediate execution")
+        except Exception:
+            _logger.warning("Could not trigger cron, falling back to background thread")
+            # Fallback: use background thread if cron trigger fails
+            dbname = self.env.cr.dbname
+            uid = self.env.uid
+            rec_ids = self.ids
+            t = threading.Thread(
+                target=self._sync_in_background,
+                args=(dbname, uid, rec_ids),
+                daemon=True,
+            )
+            t.start()
 
         return {
             'type': 'ir.actions.client',
             'tag': 'display_notification',
             'params': {
-                'title': _('Sync Started'),
-                'message': _('Sync is running in the background. Refresh the page to see progress.'),
+                'title': _('Sync Queued'),
+                'message': _('Sync will start shortly via the cron worker. '
+                             'Refresh the page to see progress.'),
                 'type': 'info',
                 'sticky': False,
             },
@@ -1541,7 +1573,15 @@ class MysdbApiSource(models.Model):
                 sources = env['mysdb.api.source'].browse(rec_ids).exists()
                 for rec in sources:
                     try:
-                        rec._do_sync()
+                        # Auto-resume: if last sync was interrupted, resume from last page
+                        resume_page = 0
+                        if rec.last_sync_status == 'error' and rec.last_sync_page > 0:
+                            resume_page = rec.last_sync_page
+                            _logger.info(
+                                "Resuming sync for %s from page %s",
+                                rec.name, resume_page,
+                            )
+                        rec._do_sync(resume_page=resume_page)
                     finally:
                         # Only release lock if cursor is still alive
                         if not rec._is_cursor_dead():
@@ -1655,22 +1695,32 @@ class MysdbApiSource(models.Model):
                 except Exception:
                     pass
 
-    def _do_sync(self):
-        """Perform full sync for a single API source record."""
+    def _do_sync(self, resume_page=0):
+        """Perform full sync for a single API source record.
+
+        Args:
+            resume_page: If > 0, skip ahead to this page (used to resume
+                         interrupted syncs). Pages before resume_page are
+                         assumed to have already been committed.
+        """
         rec = self
         total_created = 0
         total_updated = 0
-        page = rec.pagination_start if rec.pagination_start is not None else 1
+        default_start = rec.pagination_start if rec.pagination_start is not None else 1
+        page = max(default_start, resume_page) if resume_page else default_start
         start_page = page
+        is_resuming = resume_page and resume_page > default_start
 
         try:
             _logger.info(
-                "API Sync start: source=%s model=%s pagination=%s start_page=%s page_size=%s",
+                "API Sync start: source=%s model=%s pagination=%s start_page=%s "
+                "page_size=%s resume=%s",
                 rec.name,
                 rec.target_model_id.model if rec.target_model_id else None,
                 rec.enable_pagination,
-                rec.pagination_start,
+                page,
                 rec.page_size,
+                is_resuming,
             )
             empty_pages = 0
             prev_page_ids = set()  # for loop detection
@@ -1849,9 +1899,10 @@ class MysdbApiSource(models.Model):
                     time.sleep(rec.page_request_delay)
 
             total_elapsed = time.time() - sync_start_time
-            msg = "Done – Created: %s, Updated: %s (pages: %s) in %s" % (
-                total_created, total_updated, page,
-                self._format_eta(total_elapsed),
+            resume_note = " (resumed from page %s)" % start_page if is_resuming else ""
+            msg = "Done – Created: %s, Updated: %s (pages: %s–%s) in %s%s" % (
+                total_created, total_updated, start_page, page,
+                self._format_eta(total_elapsed), resume_note,
             )
             # Write final status. Lock release is handled by the CALLER
             # (_sync_in_background / cron_auto_sync_all), not here.
@@ -1968,45 +2019,72 @@ class MysdbApiSource(models.Model):
 
     @api.model
     def cron_auto_sync_all(self):
-        """Called by scheduled action to sync API sources whose next_run is due.
+        """Called by scheduled action to sync API sources whose next_run is due,
+        OR that were triggered from the "Sync Now" button (sync_in_progress=True
+        but lock held by the UI, meaning the cron should pick them up).
 
         For each source:
         1. Check if it's time to run (next_run <= now, or next_run not set)
-        2. Sync main records (orders / products / etc.)
+        2. Sync main records (orders / products / etc.) – auto-resume if interrupted
         3. If detail_sync_enabled, also sync child records (order details)
         4. Calculate next_run based on the source's interval settings
         """
         now = fields.Datetime.now()
-        sources = self.search([
+
+        # --- Pick up sources triggered from "Sync Now" button ---
+        # These have sync_in_progress=True set by action_sync() and are
+        # waiting for the cron worker to actually execute them.
+        triggered_sources = self.search([
+            ('sync_in_progress', '=', True),
+            ('active', '=', True),
+        ])
+
+        # --- Pick up auto-sync sources that are due ---
+        scheduled_sources = self.search([
             ('auto_sync', '=', True),
             ('active', '=', True),
+            ('sync_in_progress', '=', False),
             '|',
             ('auto_sync_next_run', '=', False),
             ('auto_sync_next_run', '<=', now),
         ])
+
+        sources = triggered_sources | scheduled_sources
         if not sources:
             _logger.info("Auto-sync: no API sources due for sync at %s", now)
             return
 
         for src in sources:
+            is_triggered = src in triggered_sources
             _logger.info(
-                "Auto-sync starting for API source: %s (next_run was %s)",
-                src.name, src.auto_sync_next_run,
+                "Auto-sync starting for API source: %s (triggered=%s next_run=%s)",
+                src.name, is_triggered, src.auto_sync_next_run,
             )
 
             # --- Acquire lock (skip if already running) ---
-            try:
-                if not src._acquire_sync_lock():
-                    _logger.info("Auto-sync skipped for %s – already in progress", src.name)
+            # For triggered sources, the lock is already held by action_sync()
+            if not is_triggered:
+                try:
+                    if not src._acquire_sync_lock():
+                        _logger.info("Auto-sync skipped for %s – already in progress", src.name)
+                        continue
+                except Exception:
+                    _logger.warning("Auto-sync could not acquire lock for %s", src.name)
                     continue
-            except Exception:
-                _logger.warning("Auto-sync could not acquire lock for %s", src.name)
-                continue
+
+            # --- Auto-resume: if last sync was interrupted, resume from last page ---
+            resume_page = 0
+            if src.last_sync_status == 'error' and src.last_sync_page > 0:
+                resume_page = src.last_sync_page
+                _logger.info(
+                    "Auto-sync resuming %s from page %s (previous sync was interrupted)",
+                    src.name, resume_page,
+                )
 
             try:
                 # --- Step 1: main sync ---
                 try:
-                    src._do_sync()
+                    src._do_sync(resume_page=resume_page)
                     _logger.info("Auto-sync completed for API source: %s", src.name)
                 except Exception as e:
                     _logger.error("Auto-sync failed for API source %s: %s", src.name, str(e))

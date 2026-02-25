@@ -21,10 +21,13 @@
         <field name="arch" type="xml">
             <form string="API Source">
                 <header>
-                    <button name="action_sync" type="object" string="Sync Now" class="btn-primary"
+                    <button name="action_sync" type="object" string="▶ Sync Now" class="btn-primary"
                             invisible="sync_in_progress"/>
+                    <button name="action_sync_full" type="object" string="🔄 Full Re-sync" class="btn-secondary"
+                            invisible="sync_in_progress or last_sync_status != 'error'"
+                            confirm="This will start syncing from page 1 (ignoring any resume point). Continue?"/>
                     <button name="action_clear_sync_lock" type="object"
-                            string="Clear Sync Lock" class="btn-warning"
+                            string="🔓 Clear Sync Lock" class="btn-warning"
                             invisible="not sync_in_progress"
                             confirm="This will clear the sync lock. Only use if the sync is stuck. Continue?"/>
                     <button name="action_sync_details" type="object"
