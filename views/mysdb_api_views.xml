@@ -36,6 +36,10 @@
                             class="btn-secondary"
                             invisible="not detail_sync_enabled"
                             confirm="This will create mysdb.product records from unique products found in order details. Continue?"/>
+                    <button name="action_deduplicate" type="object"
+                            string="🔄 Remove Duplicates"
+                            class="btn-warning"
+                            confirm="This will find and remove duplicate records based on the Unique Field. Keeps the oldest record. Continue?"/>
                 </header>
                 <sheet>
                     <group>

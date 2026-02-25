@@ -89,6 +89,16 @@ class MysdbApiSource(models.Model):
         string='Auto Sync', default=False,
         help='If enabled, this API source will be synced automatically by the system scheduler.'
     )
+
+    @api.constrains('auto_sync', 'unique_field')
+    def _check_auto_sync_unique_field(self):
+        for rec in self:
+            if rec.auto_sync and not rec.unique_field:
+                raise ValidationError(
+                    _("Cannot enable Auto Sync without a Unique Field. "
+                      "Without a unique field, every sync run would create "
+                      "duplicate records. Please set the Unique Field first.")
+                )
     auto_sync_interval = fields.Integer(
         string='Sync Every', default=1,
         help='How often to auto-sync this source.',
@@ -1784,6 +1794,206 @@ class MysdbApiSource(models.Model):
                 _logger.exception("Auto-sync unexpected error for %s: %s", src.name, str(e))
                 src._release_sync_lock()
                 self.env.cr.commit()
+
+    # ------------------------------------------------------------------
+    #  Deduplicate – remove duplicate records based on unique field
+    # ------------------------------------------------------------------
+    def action_deduplicate(self):
+        """Remove duplicate records from the target model based on the
+        configured unique field.  Keeps the OLDEST record (lowest id)
+        and deletes the newer duplicates.
+
+        Also deduplicates mysdb.order.detail when the target model is
+        mysdb.order.
+        """
+        rec = self.ensure_one()
+        if not rec.target_model_id:
+            raise ValidationError(_("No target model configured."))
+
+        unique_fields = []
+        if rec.unique_field:
+            model = self.env[rec.target_model_id.model].sudo()
+            unique_fields = [
+                f.strip()
+                for f in str(rec.unique_field).replace(';', ',').split(',')
+                if f.strip() and f.strip() in model._fields
+            ]
+
+        if not unique_fields:
+            raise ValidationError(
+                _("Cannot deduplicate without a Unique Field. "
+                  "Please set the Unique Field first.")
+            )
+
+        model_name = rec.target_model_id.model
+        table_name = model_name.replace('.', '_')
+
+        # Build SQL to find duplicates — keep the record with the lowest id
+        if len(unique_fields) == 1:
+            field = unique_fields[0]
+            count_sql = """
+                SELECT {field}, COUNT(*) as cnt
+                FROM {table}
+                WHERE {field} IS NOT NULL AND {field} != ''
+                GROUP BY {field}
+                HAVING COUNT(*) > 1
+            """.format(field=field, table=table_name)
+            self.env.cr.execute(count_sql)
+            dups = self.env.cr.fetchall()
+            total_dup_groups = len(dups)
+            total_extra = sum(row[1] - 1 for row in dups)
+
+            if total_extra == 0:
+                return {
+                    'type': 'ir.actions.client',
+                    'tag': 'display_notification',
+                    'params': {
+                        'title': _('No Duplicates'),
+                        'message': _('No duplicate records found in %s.') % model_name,
+                        'type': 'info',
+                        'sticky': False,
+                    },
+                }
+
+            # Delete duplicates (keep lowest id per unique value)
+            delete_sql = """
+                DELETE FROM {table}
+                WHERE id NOT IN (
+                    SELECT MIN(id)
+                    FROM {table}
+                    WHERE {field} IS NOT NULL AND {field} != ''
+                    GROUP BY {field}
+                )
+                AND {field} IN (
+                    SELECT {field}
+                    FROM {table}
+                    WHERE {field} IS NOT NULL AND {field} != ''
+                    GROUP BY {field}
+                    HAVING COUNT(*) > 1
+                )
+            """.format(field=field, table=table_name)
+        else:
+            # Multiple unique fields
+            field_list = ', '.join(unique_fields)
+            where_not_null = ' AND '.join(
+                f"{f} IS NOT NULL AND {f} != ''" for f in unique_fields
+            )
+            count_sql = """
+                SELECT {fields}, COUNT(*) as cnt
+                FROM {table}
+                WHERE {where}
+                GROUP BY {fields}
+                HAVING COUNT(*) > 1
+            """.format(fields=field_list, table=table_name, where=where_not_null)
+            self.env.cr.execute(count_sql)
+            dups = self.env.cr.fetchall()
+            total_dup_groups = len(dups)
+            total_extra = sum(row[-1] - 1 for row in dups)
+
+            if total_extra == 0:
+                return {
+                    'type': 'ir.actions.client',
+                    'tag': 'display_notification',
+                    'params': {
+                        'title': _('No Duplicates'),
+                        'message': _('No duplicate records found in %s.') % model_name,
+                        'type': 'info',
+                        'sticky': False,
+                    },
+                }
+
+            delete_sql = """
+                DELETE FROM {table}
+                WHERE id NOT IN (
+                    SELECT MIN(id)
+                    FROM {table}
+                    WHERE {where}
+                    GROUP BY {fields}
+                )
+                AND id IN (
+                    SELECT t.id FROM {table} t
+                    INNER JOIN (
+                        SELECT {fields}
+                        FROM {table}
+                        WHERE {where}
+                        GROUP BY {fields}
+                        HAVING COUNT(*) > 1
+                    ) d ON {join_cond}
+                )
+            """.format(
+                fields=field_list,
+                table=table_name,
+                where=where_not_null,
+                join_cond=' AND '.join(f"t.{f} = d.{f}" for f in unique_fields),
+            )
+
+        _logger.info(
+            "Dedup: source=%s model=%s dup_groups=%s extra_records=%s",
+            rec.name, model_name, total_dup_groups, total_extra,
+        )
+        self.env.cr.execute(delete_sql)
+        deleted = self.env.cr.rowcount
+        _logger.info("Dedup: deleted %s duplicate records from %s", deleted, model_name)
+
+        # Also dedup order details if target is mysdb.order
+        detail_deleted = 0
+        if model_name == 'mysdb.order':
+            detail_deleted = self._deduplicate_order_details()
+
+        self.env.cr.commit()
+
+        # Invalidate ORM cache since we used raw SQL
+        self.env[model_name].invalidate_model()
+        if model_name == 'mysdb.order':
+            self.env['mysdb.order.detail'].invalidate_model()
+
+        msg = _(
+            "Deduplication complete!\n"
+            "• %s: %s duplicate groups found, %s extra records deleted\n"
+        ) % (model_name, total_dup_groups, deleted)
+        if detail_deleted:
+            msg += _("• mysdb.order.detail: %s duplicate records deleted\n") % detail_deleted
+
+        return {
+            'type': 'ir.actions.client',
+            'tag': 'display_notification',
+            'params': {
+                'title': _('Deduplication Done'),
+                'message': msg,
+                'type': 'success',
+                'sticky': True,
+            },
+        }
+
+    def _deduplicate_order_details(self):
+        """Remove duplicate order detail records.
+        Keeps oldest record per (order_linked_id, product_name, product_sku, store_id)."""
+        self.env.cr.execute("""
+            DELETE FROM mysdb_order_detail
+            WHERE id NOT IN (
+                SELECT MIN(id)
+                FROM mysdb_order_detail
+                WHERE order_linked_id IS NOT NULL
+                GROUP BY order_linked_id, product_name, product_sku, store_id
+            )
+            AND order_linked_id IS NOT NULL
+            AND id IN (
+                SELECT d.id FROM mysdb_order_detail d
+                INNER JOIN (
+                    SELECT order_linked_id, product_name, product_sku, store_id
+                    FROM mysdb_order_detail
+                    WHERE order_linked_id IS NOT NULL
+                    GROUP BY order_linked_id, product_name, product_sku, store_id
+                    HAVING COUNT(*) > 1
+                ) dup ON d.order_linked_id = dup.order_linked_id
+                    AND (d.product_name = dup.product_name OR (d.product_name IS NULL AND dup.product_name IS NULL))
+                    AND (d.product_sku = dup.product_sku OR (d.product_sku IS NULL AND dup.product_sku IS NULL))
+                    AND (d.store_id = dup.store_id OR (d.store_id IS NULL AND dup.store_id IS NULL))
+            )
+        """)
+        deleted = self.env.cr.rowcount
+        _logger.info("Dedup order details: deleted %s duplicates", deleted)
+        return deleted
 
     def _dump_raw_json(self, raw, page):
         base_dir = (self.dump_directory or '').replace('\u00A0', ' ').strip().strip('"')
