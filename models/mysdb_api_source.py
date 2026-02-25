@@ -1422,10 +1422,19 @@ class MysdbApiSource(models.Model):
     # ------------------------------------------------------------------
     def _acquire_sync_lock(self):
         """Try to acquire sync lock. Returns True if acquired, False if already locked."""
-        self.env.cr.execute(
-            "SELECT sync_in_progress, sync_started_at FROM mysdb_api_source WHERE id = %s FOR UPDATE NOWAIT",
-            (self.id,)
-        )
+        try:
+            self.env.cr.execute(
+                "SELECT sync_in_progress, sync_started_at FROM mysdb_api_source WHERE id = %s FOR UPDATE NOWAIT",
+                (self.id,)
+            )
+        except Exception:
+            # Another transaction holds the row lock – skip
+            _logger.info(
+                "Skipping sync for %s – row is locked by another transaction",
+                self.name,
+            )
+            self.env.cr.rollback()
+            return False
         row = self.env.cr.fetchone()
         if row and row[0]:  # sync_in_progress is True
             started = row[1]
@@ -1440,6 +1449,8 @@ class MysdbApiSource(models.Model):
                     "Skipping sync for %s – already in progress since %s",
                     self.name, started,
                 )
+                # Release the FOR UPDATE row lock so we don't block the running sync
+                self.env.cr.commit()
                 return False
         self.write({'sync_in_progress': True, 'sync_started_at': fields.Datetime.now()})
         self.env.cr.commit()
@@ -1451,7 +1462,21 @@ class MysdbApiSource(models.Model):
             self.write({'sync_in_progress': False, 'sync_started_at': False})
             self.env.cr.commit()
         except Exception:
-            _logger.exception("Failed to release sync lock for %s", self.name)
+            _logger.warning("Release lock ORM write failed for %s, trying raw SQL", self.name)
+            try:
+                self.env.cr.rollback()
+                self.env.cr.execute(
+                    "UPDATE mysdb_api_source SET sync_in_progress = FALSE, "
+                    "sync_started_at = NULL WHERE id = %s",
+                    (self.id,)
+                )
+                self.env.cr.commit()
+            except Exception:
+                _logger.exception("Failed to release sync lock for %s (even via SQL)", self.name)
+                try:
+                    self.env.cr.rollback()
+                except Exception:
+                    pass
 
     def _do_sync(self):
         """Perform full sync for a single API source record."""
@@ -1500,11 +1525,13 @@ class MysdbApiSource(models.Model):
                     break
                 prev_page_ids = current_page_ids
 
+                page_created = 0
+                page_updated = 0
                 try:
                     with self.env.cr.savepoint():
-                        created, updated = rec._upsert_items(items)
-                        total_created += created
-                        total_updated += updated
+                        page_created, page_updated = rec._upsert_items(items)
+                        total_created += page_created
+                        total_updated += page_updated
                 except Exception as page_err:
                     _logger.warning(
                         "API Sync page %s upsert error (recovering): %s",
@@ -1512,38 +1539,57 @@ class MysdbApiSource(models.Model):
                     )
                     # Transaction is safe thanks to savepoint – continue
 
+                # ----------------------------------------------------------
+                # Commit upserted DATA first (separate from progress write).
+                # This ensures data is persisted even if the progress
+                # write hits a serialization error from a concurrent update.
+                # ----------------------------------------------------------
+                try:
+                    self.env.cr.commit()
+                except Exception as data_commit_err:
+                    _logger.warning(
+                        "API Sync page %s data commit failed (recovering): %s",
+                        page, str(data_commit_err)[:200],
+                    )
+                    try:
+                        self.env.cr.rollback()
+                    except Exception:
+                        pass
+
+                # ----------------------------------------------------------
+                # Progress update – non-critical, in its own mini-transaction.
+                # If this fails (e.g. concurrent update), we just skip it and
+                # continue to the next page.
+                # ----------------------------------------------------------
                 try:
                     rec.write({
                         'last_sync_page': page,
                         'last_sync_page_items': len(items),
-                        'last_sync_page_created': created if 'created' in dir() else 0,
-                        'last_sync_page_updated': updated if 'updated' in dir() else 0,
+                        'last_sync_page_created': page_created,
+                        'last_sync_page_updated': page_updated,
                         'last_sync_message': (
                             "Running… page %s | created %s | updated %s"
                             % (page, total_created, total_updated)
                         ),
                     })
+                    self.env.cr.commit()
                 except Exception:
-                    _logger.warning("Failed to write page progress, rolling back and retrying")
-                    self.env.cr.rollback()
-                    rec.write({
-                        'last_sync_page': page,
-                        'last_sync_message': (
-                            "Running… page %s | created %s | updated %s (recovered from error)"
-                            % (page, total_created, total_updated)
-                        ),
-                    })
-
-                # Commit after each page to persist progress.
-                self.env.cr.commit()
+                    _logger.debug(
+                        "Progress write failed for page %s (concurrent update?), continuing",
+                        page,
+                    )
+                    try:
+                        self.env.cr.rollback()
+                    except Exception:
+                        pass
 
                 _logger.info(
                     "API Sync page done: source=%s page=%s items=%s created=%s updated=%s running_total=%s",
                     rec.name,
                     page,
                     len(items),
-                    created,
-                    updated,
+                    page_created,
+                    page_updated,
                     total_created + total_updated,
                 )
 
@@ -1569,27 +1615,56 @@ class MysdbApiSource(models.Model):
             msg = "Done – Created: %s, Updated: %s (pages: %s)" % (
                 total_created, total_updated, page,
             )
-            rec.write({
-                'last_sync_at': fields.Datetime.now(),
-                'last_sync_status': 'ok',
-                'last_sync_message': msg,
-                'last_sync_count': total_created + total_updated,
-                'last_sync_page': page,
-                'sync_in_progress': False,
-                'sync_started_at': False,
-            })
-            self.env.cr.commit()
-            self.env['mysdb.sync.log'].sudo().create({
-                'source_type': 'api',
-                'source_name': rec.name,
-                'sync_datetime': fields.Datetime.now(),
-                'sync_status': 'ok',
-                'sync_message': msg,
-            })
-            self.env.cr.commit()
+            # Write final status. Lock release is handled by the CALLER
+            # (_sync_in_background / cron_auto_sync_all), not here.
+            try:
+                rec.write({
+                    'last_sync_at': fields.Datetime.now(),
+                    'last_sync_status': 'ok',
+                    'last_sync_message': msg,
+                    'last_sync_count': total_created + total_updated,
+                    'last_sync_page': page,
+                })
+                self.env.cr.commit()
+            except Exception:
+                _logger.warning(
+                    "Final status write failed for %s (concurrent update?), retrying after rollback",
+                    rec.name,
+                )
+                try:
+                    self.env.cr.rollback()
+                    rec.write({
+                        'last_sync_at': fields.Datetime.now(),
+                        'last_sync_status': 'ok',
+                        'last_sync_message': msg,
+                        'last_sync_count': total_created + total_updated,
+                    })
+                    self.env.cr.commit()
+                except Exception:
+                    _logger.warning("Retry of final status write also failed for %s", rec.name)
+                    try:
+                        self.env.cr.rollback()
+                    except Exception:
+                        pass
+            try:
+                self.env['mysdb.sync.log'].sudo().create({
+                    'source_type': 'api',
+                    'source_name': rec.name,
+                    'sync_datetime': fields.Datetime.now(),
+                    'sync_status': 'ok',
+                    'sync_message': msg,
+                })
+                self.env.cr.commit()
+            except Exception:
+                _logger.debug("Sync log write failed for %s", rec.name)
+                try:
+                    self.env.cr.rollback()
+                except Exception:
+                    pass
 
         except Exception as exc:
             _logger.exception("API Sync failed: source=%s error=%s", rec.name, str(exc))
+            # Write error status. Lock release is handled by the CALLER.
             try:
                 self.env.cr.rollback()
                 rec.write({
@@ -1600,12 +1675,14 @@ class MysdbApiSource(models.Model):
                         % (total_created, total_updated, page, str(exc)[:500])
                     ),
                     'last_sync_count': total_created + total_updated,
-                    'sync_in_progress': False,
-                    'sync_started_at': False,
                 })
                 self.env.cr.commit()
             except Exception:
                 _logger.exception("Failed to write error status for API source %s", rec.name)
+                try:
+                    self.env.cr.rollback()
+                except Exception:
+                    pass
             try:
                 self.env['mysdb.sync.log'].sudo().create({
                     'source_type': 'api',
@@ -1616,7 +1693,11 @@ class MysdbApiSource(models.Model):
                 })
                 self.env.cr.commit()
             except Exception:
-                _logger.exception("Failed to write sync log for API source %s", rec.name)
+                _logger.debug("Failed to write sync log for API source %s", rec.name)
+                try:
+                    self.env.cr.rollback()
+                except Exception:
+                    pass
 
     def _compute_next_run(self):
         """Calculate the next auto-sync run time based on interval settings."""
