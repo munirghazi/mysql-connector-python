@@ -59,7 +59,7 @@ class MysdbApiSource(models.Model):
             "Examples: 'orders' for Zid, 'data' for Jood/Bayan."
         )
     )
-    mapping_json = fields.Json(
+    mapping_json = fields.Text(
         string='Field Mapping',
         help=(
             "JSON mapping of target_field -> source_key. "
@@ -613,6 +613,17 @@ class MysdbApiSource(models.Model):
                     continue
                 keys_to_lookup.append(key_vals)
 
+            # --- Extra scope filter: if all items share the same store_id,
+            # narrow the search to that store. This dramatically speeds up
+            # lookups when the table has hundreds of thousands of records
+            # from multiple stores.
+            extra_domain = []
+            if mapped_items and 'store_id' in model._fields:
+                store_ids = {v.get('store_id') for v, _ in mapped_items
+                             if v.get('store_id')}
+                if len(store_ids) == 1:
+                    extra_domain = [('store_id', '=', store_ids.pop())]
+
             if keys_to_lookup and len(unique_fields) == 1:
                 # Single unique field – use a single 'in' query
                 field_name = unique_fields[0]
@@ -620,7 +631,8 @@ class MysdbApiSource(models.Model):
                 # Search in batches of 1000 to avoid huge IN clauses
                 for i in range(0, len(all_vals), 1000):
                     batch_vals = all_vals[i:i+1000]
-                    recs = model.search([(field_name, 'in', batch_vals)])
+                    domain = [(field_name, 'in', batch_vals)] + extra_domain
+                    recs = model.search(domain)
                     for rec in recs:
                         key = (getattr(rec, field_name),)
                         existing_map[key] = rec
@@ -637,7 +649,7 @@ class MysdbApiSource(models.Model):
                             or_domain = ['|'] + sub_domain + or_domain
                         else:
                             or_domain = sub_domain
-                    recs = model.search(or_domain)
+                    recs = model.search(or_domain + extra_domain)
                     for rec in recs:
                         key = tuple(getattr(rec, f) for f in unique_fields)
                         existing_map[key] = rec
@@ -722,10 +734,51 @@ class MysdbApiSource(models.Model):
                                 if is_order:
                                     self._sync_project_list(item, detail_model)
                         except Exception as e:
+                            err_str = str(e)
+                            # Handle unique constraint violation:
+                            # record already exists (created by concurrent sync).
+                            # Try to update instead.
+                            is_unique_violation = (
+                                'unique' in err_str.lower()
+                                or 'duplicate key' in err_str.lower()
+                                or 'UniqueViolation' in err_str
+                            )
+                            if is_unique_violation and unique_fields:
+                                try:
+                                    with self.env.cr.savepoint():
+                                        key_vals = tuple(
+                                            values.get(f) for f in unique_fields
+                                        )
+                                        domain = [
+                                            (f, '=', v)
+                                            for f, v in zip(unique_fields, key_vals)
+                                            if v not in (None, False, '')
+                                        ]
+                                        if domain:
+                                            existing = model.search(domain, limit=1)
+                                            if existing:
+                                                existing.write(values)
+                                                updated += 1
+                                                if is_order:
+                                                    self._sync_project_list(
+                                                        item, detail_model,
+                                                    )
+                                                _logger.debug(
+                                                    "Resolved duplicate via update: %s",
+                                                    {f: values.get(f)
+                                                     for f in unique_fields},
+                                                )
+                                                continue
+                                except Exception as dup_err:
+                                    _logger.warning(
+                                        "API duplicate fallback update failed: "
+                                        "source=%s error=%s",
+                                        self.name, str(dup_err)[:200],
+                                    )
                             errors += 1
                             _logger.warning(
                                 "API single create failed: source=%s error=%s",
-                                self.name, str(e)[:200],
+                                self.name, err_str[:200],
                             )
 
         if errors:
@@ -834,38 +887,63 @@ class MysdbApiSource(models.Model):
     # ==================================================================
 
     def action_sync_details(self):
-        """Start detail sync in a background thread and return immediately."""
+        """Trigger detail sync via cron worker (reliable on Odoo.sh).
+
+        Works like action_sync(): marks the source for detail sync and
+        triggers the cron, which has a longer timeout than the HTTP worker.
+        """
         for rec in self:
             if not rec.detail_sync_enabled:
                 raise ValidationError(
                     _("Detail Sync is not enabled for '%s'.") % rec.name
                 )
+            if rec.sync_in_progress:
+                raise ValidationError(
+                    _("A sync is already running for '%s'. "
+                      "Wait for it to finish or clear the lock first.")
+                    % rec.name
+                )
             rec.write({
                 'detail_last_sync_at': fields.Datetime.now(),
                 'detail_last_sync_status': 'ok',
-                'detail_last_sync_message': 'Detail sync started – running in background…',
+                'detail_last_sync_message': 'Detail sync queued – will start shortly via cron worker…',
                 'detail_last_sync_count': 0,
+                'sync_in_progress': True,
+                'sync_started_at': fields.Datetime.now(),
+                # Mark that only detail sync is needed (not main sync)
+                'last_sync_message': (rec.last_sync_message or '') + '\n[detail sync queued]',
             })
         self.env.cr.commit()
+
+        # Trigger cron + always start fallback thread (same pattern as action_sync)
+        try:
+            cron = self.env.ref(
+                'my_sdb_reporting.ir_cron_auto_sync_api', raise_if_not_found=False
+            )
+            if cron:
+                cron.sudo()._trigger()
+                _logger.info("Triggered API sync cron for detail sync execution")
+        except Exception:
+            _logger.info("Could not trigger cron for detail sync (normal on local Odoo)")
 
         dbname = self.env.cr.dbname
         uid = self.env.uid
         rec_ids = self.ids
-
         t = threading.Thread(
             target=self._detail_sync_in_background,
             args=(dbname, uid, rec_ids),
             daemon=True,
         )
         t.start()
+        _logger.info("Background detail sync thread started as fallback for ids=%s", rec_ids)
 
         return {
             'type': 'ir.actions.client',
             'tag': 'display_notification',
             'params': {
-                'title': _('Detail Sync Started'),
+                'title': _('Detail Sync Queued'),
                 'message': _(
-                    'Detail sync is running in the background. '
+                    'Detail sync will start shortly via the cron worker. '
                     'Refresh the page to see progress.'
                 ),
                 'type': 'info',
@@ -875,7 +953,8 @@ class MysdbApiSource(models.Model):
 
     @classmethod
     def _detail_sync_in_background(cls, dbname, uid, rec_ids):
-        """Execute detail sync in a new cursor / environment."""
+        """Execute detail sync in a new cursor / environment.
+        Also releases the sync lock set by action_sync_details()."""
         try:
             registry = odoo.registry(dbname)
             with registry.cursor() as cr:
@@ -904,10 +983,18 @@ class MysdbApiSource(models.Model):
                                 "Failed to write error status for detail sync %s",
                                 rec.name,
                             )
-        except Exception:
+                    finally:
+                        # Release the sync lock set by action_sync_details
+                        if not rec._is_cursor_dead():
+                            rec._release_sync_lock()
+                if not cls._check_cursor_dead(cr):
+                    cr.commit()
+        except Exception as e:
             _logger.exception(
                 "Background detail sync thread crashed (ids=%s)", rec_ids
             )
+            # Release lock with a fresh cursor
+            cls._cleanup_after_crash(dbname, uid, rec_ids, e)
 
     def _do_sync_details(self):
         """Fetch child records for each parent record via per-record API."""
@@ -1001,6 +1088,31 @@ class MysdbApiSource(models.Model):
                             "but domain %s matches only %s"
                             % (parent_domain, matched)
                         )
+                        # Suggest correct store_id values if domain
+                        # filters by store_id with 0 results
+                        if matched == 0 and 'store_id' in str(parent_domain):
+                            try:
+                                self.env.cr.execute("""
+                                    SELECT store_id, COUNT(*) as cnt
+                                    FROM %s
+                                    WHERE store_id IS NOT NULL
+                                      AND store_id != ''
+                                    GROUP BY store_id
+                                    ORDER BY cnt DESC
+                                    LIMIT 10
+                                """ % parent_model._table)
+                                available = self.env.cr.fetchall()
+                                if available:
+                                    store_list = ", ".join(
+                                        "%s (%s orders)" % (r[0], r[1])
+                                        for r in available
+                                    )
+                                    diag_parts.append(
+                                        "Available store_ids: %s"
+                                        % store_list
+                                    )
+                            except Exception:
+                                pass
                     if missing_id_count > 0:
                         diag_parts.append(
                             "%s records have empty '%s' field"
@@ -1055,6 +1167,9 @@ class MysdbApiSource(models.Model):
             self.env.cr.commit()
 
             # ------ Per-record fetch loop ------
+            consecutive_errors = 0
+            MAX_CONSECUTIVE_ERRORS = 50  # Stop if network is down
+            last_error_msg = ""
             for idx, (pid, parent) in enumerate(to_fetch):
                 try:
                     url = rec.detail_url_pattern.replace('{id}', str(pid))
@@ -1074,6 +1189,7 @@ class MysdbApiSource(models.Model):
                                 continue
                             raise
                     total_fetched += 1
+                    consecutive_errors = 0  # Reset on success
 
                     # Dump raw JSON if enabled
                     if rec.dump_json and _raw:
@@ -1098,57 +1214,133 @@ class MysdbApiSource(models.Model):
                                 total_created += page_created
                                 total_updated += page_updated
                                 total_errors += page_errors
+                                if page_errors:
+                                    consecutive_errors += page_errors
+                                else:
+                                    consecutive_errors = 0
                         except Exception as upsert_err:
                             total_errors += 1
+                            consecutive_errors += 1
+                            last_error_msg = str(upsert_err)[:300]
                             _logger.warning(
                                 "Detail upsert error for parent %s: %s",
-                                pid, str(upsert_err)[:300],
+                                pid, last_error_msg,
                             )
 
                 except Exception as e:
                     total_errors += 1
+                    consecutive_errors += 1
+                    last_error_msg = str(e)[:300]
                     _logger.warning(
                         "Detail fetch error for parent %s: %s",
-                        pid, str(e)[:300],
+                        pid, last_error_msg,
                     )
+                    # If cursor is dead, stop immediately
+                    if self._is_cursor_dead():
+                        _logger.warning(
+                            "Cursor died during detail sync at parent %s, stopping",
+                            pid,
+                        )
+                        break
+
+                # If cursor died during upsert, stop the loop
+                if self._is_cursor_dead():
+                    _logger.warning(
+                        "Cursor died during detail sync after parent %s, stopping",
+                        pid,
+                    )
+                    break
+
+                # Stop early if too many consecutive errors (e.g. network down)
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                    _logger.warning(
+                        "Detail sync: %s consecutive errors, stopping early. "
+                        "Last error: %s",
+                        consecutive_errors, last_error_msg,
+                    )
+                    break
 
                 # Progress update & commit every 5 records
                 if (idx + 1) % 5 == 0 or idx == len(to_fetch) - 1:
                     try:
                         rec.write({
                             'detail_last_sync_message': (
-                                "Progress: %s/%s fetched, %s created, "
-                                "%s updated, %s errors"
+                                "Progress: %s/%s processed, %s fetched OK, "
+                                "%s created, %s updated, %s errors"
                                 % (
-                                    idx + 1, len(to_fetch),
+                                    idx + 1, len(to_fetch), total_fetched,
                                     total_created, total_updated, total_errors,
                                 )
                             ),
                             'detail_last_sync_count': total_created + total_updated,
                         })
                     except Exception:
+                        if self._is_cursor_dead():
+                            _logger.warning("Cursor died during detail progress write, stopping")
+                            break
+                        try:
+                            self.env.cr.rollback()
+                        except Exception:
+                            pass
+                try:
+                    self.env.cr.commit()
+                except Exception:
+                    if self._is_cursor_dead():
+                        _logger.warning("Cursor died during detail commit, stopping")
+                        break
+                    try:
                         self.env.cr.rollback()
-                self.env.cr.commit()
+                    except Exception:
+                        pass
 
                 if rec.detail_request_delay:
                     time.sleep(rec.detail_request_delay)
 
             # ------ Done ------
+            # Determine final status based on results
+            if total_errors > 0 and (total_created + total_updated) == 0:
+                final_status = 'error'
+            else:
+                final_status = 'ok'
+
+            stopped_early = ""
+            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                stopped_early = (
+                    " | STOPPED: %s consecutive errors (last: %s)"
+                    % (consecutive_errors, last_error_msg[:200])
+                )
+
             msg = (
-                "Done – Fetched: %s, Created: %s, Updated: %s, "
-                "Skipped (already synced): %s, Errors: %s"
+                "Done – Processed: %s/%s, Fetched OK: %s, Created: %s, "
+                "Updated: %s, Skipped (already synced): %s, Errors: %s%s"
                 % (
-                    total_fetched, total_created, total_updated,
-                    total_skipped, total_errors,
+                    min(idx + 1, len(to_fetch)) if to_fetch else 0,
+                    len(to_fetch), total_fetched, total_created,
+                    total_updated, total_skipped, total_errors,
+                    stopped_early,
                 )
             )
-            rec.write({
-                'detail_last_sync_at': fields.Datetime.now(),
-                'detail_last_sync_status': 'ok',
-                'detail_last_sync_message': msg,
-                'detail_last_sync_count': total_created + total_updated,
-            })
-            self.env.cr.commit()
+            if self._is_cursor_dead():
+                _logger.info(
+                    "Detail sync page loop done but cursor is dead, skipping final write: %s",
+                    msg,
+                )
+                return
+            try:
+                rec.write({
+                    'detail_last_sync_at': fields.Datetime.now(),
+                    'detail_last_sync_status': final_status,
+                    'detail_last_sync_message': msg,
+                    'detail_last_sync_count': total_created + total_updated,
+                })
+                self.env.cr.commit()
+            except Exception:
+                _logger.warning("Detail sync final write failed for %s", rec.name)
+                if not self._is_cursor_dead():
+                    try:
+                        self.env.cr.rollback()
+                    except Exception:
+                        pass
             _logger.info("Detail sync done: source=%s %s", rec.name, msg)
 
         except Exception as exc:
@@ -1234,12 +1426,18 @@ class MysdbApiSource(models.Model):
             if not values:
                 continue
 
-            # Upsert logic
+            # Upsert logic – scope lookup by order_linked_id to prevent
+            # cross-store collisions (e.g. Zid id=5 vs Bayan id=5)
             if unique_field and unique_field in values:
                 unique_val = values.get(unique_field)
                 if unique_val:
+                    lookup_domain = [(unique_field, '=', unique_val)]
+                    if values.get('order_linked_id'):
+                        lookup_domain.append(
+                            ('order_linked_id', '=', values['order_linked_id'])
+                        )
                     existing = detail_model.search(
-                        [(unique_field, '=', unique_val)], limit=1,
+                        lookup_domain, limit=1,
                     )
                     if existing:
                         try:
@@ -1527,7 +1725,11 @@ class MysdbApiSource(models.Model):
             })
         self.env.cr.commit()
 
-        # Trigger the API sync cron to run ASAP (runs in the cron worker process)
+        # Try to trigger the cron worker AND always start a background thread.
+        # On Odoo.sh the cron worker will pick it up (longer timeout).
+        # On local Odoo the cron worker may not exist, so the background
+        # thread acts as a reliable fallback.  Both paths check
+        # sync_in_progress before doing work, so there is no double-run.
         try:
             cron = self.env.ref(
                 'my_sdb_reporting.ir_cron_auto_sync_api', raise_if_not_found=False
@@ -1536,17 +1738,21 @@ class MysdbApiSource(models.Model):
                 cron.sudo()._trigger()
                 _logger.info("Triggered API sync cron for immediate execution")
         except Exception:
-            _logger.warning("Could not trigger cron, falling back to background thread")
-            # Fallback: use background thread if cron trigger fails
-            dbname = self.env.cr.dbname
-            uid = self.env.uid
-            rec_ids = self.ids
-            t = threading.Thread(
-                target=self._sync_in_background,
-                args=(dbname, uid, rec_ids),
-                daemon=True,
-            )
-            t.start()
+            _logger.info("Could not trigger cron (normal on local Odoo)")
+
+        # Always start a background thread as fallback.  If the cron worker
+        # picks up the job first, _sync_in_background will detect that
+        # sync_in_progress was already cleared (or the job is done) and exit.
+        dbname = self.env.cr.dbname
+        uid = self.env.uid
+        rec_ids = self.ids
+        t = threading.Thread(
+            target=self._sync_in_background,
+            args=(dbname, uid, rec_ids),
+            daemon=True,
+        )
+        t.start()
+        _logger.info("Background sync thread started as fallback for ids=%s", rec_ids)
 
         return {
             'type': 'ir.actions.client',
@@ -1565,23 +1771,60 @@ class MysdbApiSource(models.Model):
     # ------------------------------------------------------------------
     @classmethod
     def _sync_in_background(cls, dbname, uid, rec_ids):
-        """Execute the actual sync in a new cursor / environment."""
+        """Execute the actual sync in a new cursor / environment.
+
+        This is the fallback when the cron trigger fails. It runs:
+        1. Main sync (with auto-resume)
+        2. Detail sync (if enabled)
+        3. Lock release
+        """
         try:
             registry = odoo.registry(dbname)
             with registry.cursor() as cr:
                 env = odoo.api.Environment(cr, uid, {})
                 sources = env['mysdb.api.source'].browse(rec_ids).exists()
                 for rec in sources:
+                    # Guard: if the cron worker already completed this job,
+                    # sync_in_progress will be False.  Skip to avoid double-run.
+                    rec.invalidate_recordset()  # re-read from DB
+                    if not rec.sync_in_progress:
+                        _logger.info(
+                            "Background thread skipping %s – already handled by cron",
+                            rec.name,
+                        )
+                        continue
+                    main_ok = False
                     try:
-                        # Auto-resume: if last sync was interrupted, resume from last page
-                        resume_page = 0
-                        if rec.last_sync_status == 'error' and rec.last_sync_page > 0:
-                            resume_page = rec.last_sync_page
-                            _logger.info(
-                                "Resuming sync for %s from page %s",
-                                rec.name, resume_page,
-                            )
-                        rec._do_sync(resume_page=resume_page)
+                        # --- Step 1: main sync ---
+                        # Detect detail-only trigger
+                        detail_only = (
+                            rec.detail_sync_enabled
+                            and 'detail sync queued' in (rec.last_sync_message or '').lower()
+                        )
+                        if not detail_only:
+                            resume_page = 0
+                            if rec.last_sync_status == 'error' and rec.last_sync_page > 0:
+                                resume_page = rec.last_sync_page
+                                _logger.info(
+                                    "Resuming sync for %s from page %s",
+                                    rec.name, resume_page,
+                                )
+                            rec._do_sync(resume_page=resume_page)
+                        main_ok = True
+
+                        # --- Step 2: detail sync (if enabled) ---
+                        if rec.detail_sync_enabled and not rec._is_cursor_dead():
+                            try:
+                                rec._do_sync_details()
+                                _logger.info(
+                                    "Background detail sync completed for %s",
+                                    rec.name,
+                                )
+                            except Exception as detail_err:
+                                _logger.error(
+                                    "Background detail sync failed for %s: %s",
+                                    rec.name, str(detail_err)[:300],
+                                )
                     finally:
                         # Only release lock if cursor is still alive
                         if not rec._is_cursor_dead():
@@ -1695,13 +1938,15 @@ class MysdbApiSource(models.Model):
                 except Exception:
                     pass
 
-    def _do_sync(self, resume_page=0):
+    def _do_sync(self, resume_page=0, max_pages=50000):
         """Perform full sync for a single API source record.
 
         Args:
             resume_page: If > 0, skip ahead to this page (used to resume
                          interrupted syncs). Pages before resume_page are
                          assumed to have already been committed.
+            max_pages:   Safety limit to prevent infinite pagination loops.
+                         Default 50 000 pages.
         """
         rec = self
         total_created = 0
@@ -1723,6 +1968,8 @@ class MysdbApiSource(models.Model):
                 is_resuming,
             )
             empty_pages = 0
+            consecutive_all_existing_pages = 0  # for incremental stop-early
+            STOP_AFTER_ALL_EXISTING = 3  # stop if N consecutive pages had 0 creates
             prev_page_ids = set()  # for loop detection
             sync_start_time = time.time()
             estimated_total_pages = None  # discovered from API response
@@ -1892,6 +2139,55 @@ class MysdbApiSource(models.Model):
                         break
                 else:
                     empty_pages = 0
+
+                # --- Incremental stop-early: if N consecutive pages had only
+                # updates (zero creates), all remaining pages are already synced.
+                # This avoids re-processing thousands of existing pages.
+                # SAFETY: We use different thresholds depending on whether we
+                # know the total number of pages:
+                #   - Known total: stop only after >= 90% of pages processed
+                #   - Unknown total: require many more consecutive all-update
+                #     pages (20) to be safe against partial previous syncs
+                if items and page_created == 0 and page_updated > 0:
+                    consecutive_all_existing_pages += 1
+                    can_stop_early = False
+                    pages_from_start = page - start_page + 1
+                    if estimated_total_pages and estimated_total_pages > 0:
+                        progress_ratio = page / estimated_total_pages
+                        if (progress_ratio >= 0.9
+                                and consecutive_all_existing_pages >= STOP_AFTER_ALL_EXISTING):
+                            can_stop_early = True
+                    else:
+                        # Unknown total pages – use a much higher threshold
+                        # (20 consecutive all-update pages = 1000 records at
+                        # page_size=50 or 200 at page_size=10) to avoid
+                        # premature stops on partially-synced sources.
+                        SAFE_THRESHOLD = 20
+                        if (consecutive_all_existing_pages >= SAFE_THRESHOLD
+                                and pages_from_start > SAFE_THRESHOLD):
+                            can_stop_early = True
+
+                    if can_stop_early:
+                        _logger.info(
+                            "API Sync incremental stop: %s consecutive pages with "
+                            "0 creates (all records already exist). source=%s page=%s "
+                            "total_created=%s total_updated=%s",
+                            consecutive_all_existing_pages, rec.name, page,
+                            total_created, total_updated,
+                        )
+                        break
+                else:
+                    consecutive_all_existing_pages = 0
+
+                # Safety limit: prevent infinite pagination loops
+                pages_processed = page - start_page + 1
+                if pages_processed >= max_pages:
+                    _logger.warning(
+                        "API Sync hit safety max_pages limit (%s): source=%s page=%s",
+                        max_pages, rec.name, page,
+                    )
+                    break
+
                 page += 1
 
                 # Rate limiting: wait between page requests
@@ -2020,8 +2316,8 @@ class MysdbApiSource(models.Model):
     @api.model
     def cron_auto_sync_all(self):
         """Called by scheduled action to sync API sources whose next_run is due,
-        OR that were triggered from the "Sync Now" button (sync_in_progress=True
-        but lock held by the UI, meaning the cron should pick them up).
+        OR that were triggered from the "Sync Now" / "Sync Details" buttons
+        (sync_in_progress=True, waiting for cron worker to pick them up).
 
         For each source:
         1. Check if it's time to run (next_run <= now, or next_run not set)
@@ -2029,11 +2325,10 @@ class MysdbApiSource(models.Model):
         3. If detail_sync_enabled, also sync child records (order details)
         4. Calculate next_run based on the source's interval settings
         """
+        MAX_PAGES = 50000  # safety limit to prevent infinite pagination loops
         now = fields.Datetime.now()
 
-        # --- Pick up sources triggered from "Sync Now" button ---
-        # These have sync_in_progress=True set by action_sync() and are
-        # waiting for the cron worker to actually execute them.
+        # --- Pick up sources triggered from "Sync Now" / "Sync Details" buttons ---
         triggered_sources = self.search([
             ('sync_in_progress', '=', True),
             ('active', '=', True),
@@ -2056,13 +2351,20 @@ class MysdbApiSource(models.Model):
 
         for src in sources:
             is_triggered = src in triggered_sources
+            # Detect detail-only trigger: action_sync_details sets a marker
+            detail_only = (
+                is_triggered
+                and src.detail_sync_enabled
+                and src.detail_last_sync_message
+                and 'detail sync queued' in (src.last_sync_message or '').lower()
+            )
             _logger.info(
-                "Auto-sync starting for API source: %s (triggered=%s next_run=%s)",
-                src.name, is_triggered, src.auto_sync_next_run,
+                "Auto-sync starting for API source: %s (triggered=%s detail_only=%s next_run=%s)",
+                src.name, is_triggered, detail_only, src.auto_sync_next_run,
             )
 
             # --- Acquire lock (skip if already running) ---
-            # For triggered sources, the lock is already held by action_sync()
+            # For triggered sources, the lock is already held by action_sync/action_sync_details
             if not is_triggered:
                 try:
                     if not src._acquire_sync_lock():
@@ -2072,29 +2374,28 @@ class MysdbApiSource(models.Model):
                     _logger.warning("Auto-sync could not acquire lock for %s", src.name)
                     continue
 
-            # --- Auto-resume: if last sync was interrupted, resume from last page ---
-            resume_page = 0
-            if src.last_sync_status == 'error' and src.last_sync_page > 0:
-                resume_page = src.last_sync_page
-                _logger.info(
-                    "Auto-sync resuming %s from page %s (previous sync was interrupted)",
-                    src.name, resume_page,
-                )
-
             try:
-                # --- Step 1: main sync ---
-                try:
-                    src._do_sync(resume_page=resume_page)
-                    _logger.info("Auto-sync completed for API source: %s", src.name)
-                except Exception as e:
-                    _logger.error("Auto-sync failed for API source %s: %s", src.name, str(e))
-                    if self._is_cursor_dead():
-                        _logger.warning("Auto-sync cursor died for %s, aborting remaining sources", src.name)
-                        return
-                    src._compute_next_run()
-                    src._release_sync_lock()
-                    self.env.cr.commit()
-                    continue  # skip detail sync if main sync crashed
+                # --- Step 1: main sync (skip if detail-only trigger) ---
+                if not detail_only:
+                    resume_page = 0
+                    if src.last_sync_status == 'error' and src.last_sync_page > 0:
+                        resume_page = src.last_sync_page
+                        _logger.info(
+                            "Auto-sync resuming %s from page %s (previous sync was interrupted)",
+                            src.name, resume_page,
+                        )
+                    try:
+                        src._do_sync(resume_page=resume_page, max_pages=MAX_PAGES)
+                        _logger.info("Auto-sync completed for API source: %s", src.name)
+                    except Exception as e:
+                        _logger.error("Auto-sync failed for API source %s: %s", src.name, str(e))
+                        if self._is_cursor_dead():
+                            _logger.warning("Auto-sync cursor died for %s, aborting remaining sources", src.name)
+                            return
+                        src._compute_next_run()
+                        src._release_sync_lock()
+                        self.env.cr.commit()
+                        continue  # skip detail sync if main sync crashed
 
                 # --- Step 2: detail sync (if enabled) ---
                 if src.detail_sync_enabled:
@@ -2109,6 +2410,12 @@ class MysdbApiSource(models.Model):
                             "Auto detail-sync failed for API source %s: %s",
                             src.name, str(e),
                         )
+                        if self._is_cursor_dead():
+                            _logger.warning(
+                                "Auto-sync cursor died during detail sync for %s, aborting",
+                                src.name,
+                            )
+                            return
 
                 # --- Step 3: schedule next run & release lock ---
                 if not self._is_cursor_dead():

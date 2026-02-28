@@ -12,6 +12,11 @@ class MysdbOrder(models.Model):
     _name = 'mysdb.order'
     _description = 'MySDB Orders'
     _rec_name = 'order_code'
+    _sql_constraints = [
+        ('order_store_unique',
+         'unique(order_id, store_id)',
+         'An order with this Order ID already exists for this store.'),
+    ]
 
     source_system = fields.Char('Source System', index=True)
     order_id = fields.Char('Order ID', required=True, index=True)
@@ -91,7 +96,7 @@ class MysdbOrderDetail(models.Model):
     updated_at = fields.Datetime('Updated At')
 
     def init(self):
-        """Create composite indexes for report view JOINs."""
+        """Create composite indexes for report view JOINs and partial unique constraints."""
         self.env.cr.execute("""
             CREATE INDEX IF NOT EXISTS mysdb_order_detail_sku_store_idx
             ON mysdb_order_detail (product_sku, store_id)
@@ -100,6 +105,19 @@ class MysdbOrderDetail(models.Model):
             CREATE INDEX IF NOT EXISTS mysdb_order_detail_pid_store_idx
             ON mysdb_order_detail (product_id, store_id)
             WHERE product_id IS NOT NULL
+        """)
+        # Partial unique constraint for Zid detail records (order_detail_uuid
+        # is the Zid product ID, NOT a globally unique line-item UUID).
+        # The same product can appear in many orders, so uniqueness must
+        # be scoped per order (order_linked_id).
+        # Drop the old global index first if it exists.
+        self.env.cr.execute("""
+            DROP INDEX IF EXISTS mysdb_order_detail_uuid_uniq
+        """)
+        self.env.cr.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS mysdb_order_detail_uuid_order_uniq
+            ON mysdb_order_detail (order_detail_uuid, order_linked_id)
+            WHERE order_detail_uuid IS NOT NULL AND order_detail_uuid != ''
         """)
 
     @api.model

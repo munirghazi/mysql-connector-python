@@ -68,7 +68,7 @@ class MysdbSheetSource(models.Model):
         string='Unique Field',
         help="Field used to upsert (e.g. product_id). Leave empty to always create."
     )
-    mapping_json = fields.Json(
+    mapping_json = fields.Text(
         string='Field Mapping',
         help=(
             "JSON mapping of target_field -> sheet column name. "
