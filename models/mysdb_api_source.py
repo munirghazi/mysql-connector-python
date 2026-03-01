@@ -2313,6 +2313,64 @@ class MysdbApiSource(models.Model):
             delta = timedelta(hours=interval)
         self.write({'auto_sync_next_run': now + delta})
 
+    @classmethod
+    def _cron_cleanup_source(cls, dbname, uid, src_id, error_msg=None):
+        """Release lock & set next_run for a source using a FRESH cursor.
+
+        Called when the main cursor dies (e.g. Odoo.sh worker timeout) so we
+        can still clean up the source and allow other sources to proceed.
+        Returns True if cleanup succeeded.
+        """
+        try:
+            registry = odoo.registry(dbname)
+            with registry.cursor() as cr:
+                if error_msg:
+                    cr.execute(
+                        "UPDATE mysdb_api_source SET "
+                        "sync_in_progress = FALSE, sync_started_at = NULL, "
+                        "auto_sync_next_run = NOW() + interval '1 hour', "
+                        "last_sync_status = 'error', "
+                        "last_sync_message = %s "
+                        "WHERE id = %s",
+                        (error_msg[:1000], src_id),
+                    )
+                else:
+                    cr.execute(
+                        "UPDATE mysdb_api_source SET "
+                        "sync_in_progress = FALSE, sync_started_at = NULL, "
+                        "auto_sync_next_run = NOW() + interval '1 hour' "
+                        "WHERE id = %s",
+                        (src_id,),
+                    )
+                cr.commit()
+                _logger.info(
+                    "Cron cleanup: released lock for source %s via fresh cursor (next_run +1h)",
+                    src_id,
+                )
+            return True
+        except Exception:
+            _logger.exception(
+                "Cron cleanup: FAILED to release lock for source %s via fresh cursor",
+                src_id,
+            )
+            return False
+
+    @classmethod
+    def _cron_recover_cursor(cls, dbname, uid, context):
+        """Open a fresh DB cursor and return a new (self, env) after cursor death.
+
+        Returns new Environment or None on failure.
+        """
+        try:
+            registry = odoo.registry(dbname)
+            new_cr = registry.cursor()
+            new_env = api.Environment(new_cr, uid, context)
+            _logger.info("Cron: recovered with fresh cursor for remaining sources")
+            return new_env
+        except Exception:
+            _logger.exception("Cron: CANNOT open fresh cursor, aborting remaining sources")
+            return None
+
     @api.model
     def cron_auto_sync_all(self):
         """Called by scheduled action to sync API sources whose next_run is due,
@@ -2324,113 +2382,180 @@ class MysdbApiSource(models.Model):
         2. Sync main records (orders / products / etc.) – auto-resume if interrupted
         3. If detail_sync_enabled, also sync child records (order details)
         4. Calculate next_run based on the source's interval settings
+
+        IMPORTANT: If the DB cursor dies after processing one source (common on
+        Odoo.sh due to worker time limits), the method recovers with a fresh
+        cursor and continues to the remaining sources instead of aborting.
         """
         MAX_PAGES = 50000  # safety limit to prevent infinite pagination loops
         now = fields.Datetime.now()
+        dbname = self.env.cr.dbname
+        uid = self.env.uid
+        ctx = dict(self.env.context)
 
-        # --- Pick up sources triggered from "Sync Now" / "Sync Details" buttons ---
-        triggered_sources = self.search([
+        # --- Collect source IDs upfront (before any cursor death) ---
+        triggered_ids = self.search([
             ('sync_in_progress', '=', True),
             ('active', '=', True),
-        ])
+        ]).ids
 
-        # --- Pick up auto-sync sources that are due ---
-        scheduled_sources = self.search([
+        scheduled_ids = self.search([
             ('auto_sync', '=', True),
             ('active', '=', True),
             ('sync_in_progress', '=', False),
             '|',
             ('auto_sync_next_run', '=', False),
             ('auto_sync_next_run', '<=', now),
-        ])
+        ]).ids
 
-        sources = triggered_sources | scheduled_sources
-        if not sources:
+        # Deduplicate while preserving order
+        all_ids = list(dict.fromkeys(triggered_ids + scheduled_ids))
+        if not all_ids:
             _logger.info("Auto-sync: no API sources due for sync at %s", now)
             return
 
-        for src in sources:
-            is_triggered = src in triggered_sources
-            # Detect detail-only trigger: action_sync_details sets a marker
-            detail_only = (
-                is_triggered
-                and src.detail_sync_enabled
-                and src.detail_last_sync_message
-                and 'detail sync queued' in (src.last_sync_message or '').lower()
-            )
-            _logger.info(
-                "Auto-sync starting for API source: %s (triggered=%s detail_only=%s next_run=%s)",
-                src.name, is_triggered, detail_only, src.auto_sync_next_run,
-            )
+        triggered_set = set(triggered_ids)
+        _logger.info(
+            "Auto-sync: %d source(s) to process: %s (triggered: %s)",
+            len(all_ids), all_ids, list(triggered_set),
+        )
+
+        for src_id in all_ids:
+            # --- Ensure we have a working cursor ---
+            if self._is_cursor_dead():
+                _logger.warning(
+                    "Cron cursor is dead before source %s, recovering…", src_id,
+                )
+                new_env = self._cron_recover_cursor(dbname, uid, ctx)
+                if new_env is None:
+                    return  # truly cannot continue
+                self = self.with_env(new_env)
+
+            src = self.browse(src_id)
+            is_triggered = src_id in triggered_set
+
+            # --- Read source metadata (may fail if cursor just died) ---
+            try:
+                src_name = src.name
+                detail_only = (
+                    is_triggered
+                    and src.detail_sync_enabled
+                    and src.detail_last_sync_message
+                    and 'detail sync queued' in (src.last_sync_message or '').lower()
+                )
+                _logger.info(
+                    "Auto-sync starting for API source: %s (id=%s triggered=%s detail_only=%s)",
+                    src_name, src_id, is_triggered, detail_only,
+                )
+            except Exception:
+                _logger.warning("Cannot read source %s (cursor dead?), skipping", src_id)
+                self._cron_cleanup_source(dbname, uid, src_id,
+                                          "Skipped – cursor dead before sync started")
+                continue
 
             # --- Acquire lock (skip if already running) ---
-            # For triggered sources, the lock is already held by action_sync/action_sync_details
             if not is_triggered:
                 try:
                     if not src._acquire_sync_lock():
-                        _logger.info("Auto-sync skipped for %s – already in progress", src.name)
+                        _logger.info("Auto-sync skipped for %s – already in progress", src_name)
                         continue
                 except Exception:
-                    _logger.warning("Auto-sync could not acquire lock for %s", src.name)
+                    _logger.warning("Auto-sync could not acquire lock for %s", src_name)
+                    continue
+
+            # --- Pre-set next_run BEFORE starting sync ---
+            # This prevents the source from being re-triggered immediately
+            # if the cursor dies during sync.
+            try:
+                src._compute_next_run()
+                self.env.cr.commit()
+            except Exception:
+                _logger.debug("Pre-set next_run failed for %s (non-critical)", src_name)
+                if self._is_cursor_dead():
+                    self._cron_cleanup_source(dbname, uid, src_id,
+                                              "Cursor died while pre-setting next_run")
                     continue
 
             try:
                 # --- Step 1: main sync (skip if detail-only trigger) ---
                 if not detail_only:
                     resume_page = 0
-                    if src.last_sync_status == 'error' and src.last_sync_page > 0:
-                        resume_page = src.last_sync_page
-                        _logger.info(
-                            "Auto-sync resuming %s from page %s (previous sync was interrupted)",
-                            src.name, resume_page,
-                        )
+                    try:
+                        if src.last_sync_status == 'error' and src.last_sync_page > 0:
+                            resume_page = src.last_sync_page
+                            _logger.info(
+                                "Auto-sync resuming %s from page %s",
+                                src_name, resume_page,
+                            )
+                    except Exception:
+                        pass  # cursor may be dead, resume_page stays 0
+
                     try:
                         src._do_sync(resume_page=resume_page, max_pages=MAX_PAGES)
-                        _logger.info("Auto-sync completed for API source: %s", src.name)
+                        _logger.info("Auto-sync main sync completed for: %s", src_name)
                     except Exception as e:
-                        _logger.error("Auto-sync failed for API source %s: %s", src.name, str(e))
+                        _logger.error("Auto-sync main sync failed for %s: %s", src_name, str(e))
                         if self._is_cursor_dead():
-                            _logger.warning("Auto-sync cursor died for %s, aborting remaining sources", src.name)
-                            return
-                        src._compute_next_run()
-                        src._release_sync_lock()
-                        self.env.cr.commit()
-                        continue  # skip detail sync if main sync crashed
+                            _logger.warning("Cursor died during main sync of %s, cleaning up", src_name)
+                            self._cron_cleanup_source(
+                                dbname, uid, src_id,
+                                "Cursor died during main sync. Error: %s" % str(e)[:300],
+                            )
+                            continue  # move to next source
+                        # Cursor alive → release lock and skip detail sync
+                        try:
+                            src._release_sync_lock()
+                            self.env.cr.commit()
+                        except Exception:
+                            pass
+                        continue
 
                 # --- Step 2: detail sync (if enabled) ---
-                if src.detail_sync_enabled:
-                    try:
-                        src._do_sync_details()
-                        _logger.info(
-                            "Auto detail-sync completed for API source: %s",
-                            src.name,
-                        )
-                    except Exception as e:
-                        _logger.error(
-                            "Auto detail-sync failed for API source %s: %s",
-                            src.name, str(e),
-                        )
-                        if self._is_cursor_dead():
-                            _logger.warning(
-                                "Auto-sync cursor died during detail sync for %s, aborting",
-                                src.name,
-                            )
-                            return
-
-                # --- Step 3: schedule next run & release lock ---
                 if not self._is_cursor_dead():
-                    src._compute_next_run()
-                    src._release_sync_lock()
-                    self.env.cr.commit()
+                    try:
+                        detail_enabled = src.detail_sync_enabled
+                    except Exception:
+                        detail_enabled = False
+                    if detail_enabled:
+                        try:
+                            src._do_sync_details()
+                            _logger.info("Auto detail-sync completed for: %s", src_name)
+                        except Exception as e:
+                            _logger.error("Auto detail-sync failed for %s: %s", src_name, str(e))
+                            if self._is_cursor_dead():
+                                _logger.warning("Cursor died during detail sync of %s", src_name)
+                                self._cron_cleanup_source(
+                                    dbname, uid, src_id,
+                                    "Cursor died during detail sync. Error: %s" % str(e)[:300],
+                                )
+                                continue
+
+                # --- Step 3: release lock ---
+                if not self._is_cursor_dead():
+                    try:
+                        src._release_sync_lock()
+                        self.env.cr.commit()
+                        _logger.info("Auto-sync finished for %s – lock released", src_name)
+                    except Exception:
+                        _logger.warning("Lock release failed for %s, using fresh cursor", src_name)
+                        self._cron_cleanup_source(dbname, uid, src_id)
                 else:
-                    _logger.warning("Auto-sync cursor died for %s after sync", src.name)
-                    return
+                    _logger.warning("Cursor died after sync of %s, cleaning up via fresh cursor", src_name)
+                    self._cron_cleanup_source(dbname, uid, src_id)
 
             except Exception as e:
-                _logger.exception("Auto-sync unexpected error for %s: %s", src.name, str(e))
+                _logger.exception("Auto-sync unexpected error for %s: %s", src_name, str(e))
                 if not self._is_cursor_dead():
-                    src._release_sync_lock()
-                    self.env.cr.commit()
+                    try:
+                        src._release_sync_lock()
+                        self.env.cr.commit()
+                    except Exception:
+                        self._cron_cleanup_source(dbname, uid, src_id)
+                else:
+                    self._cron_cleanup_source(
+                        dbname, uid, src_id,
+                        "Unexpected error (cursor dead): %s" % str(e)[:300],
+                    )
 
     # ------------------------------------------------------------------
     #  Deduplicate – remove duplicate records based on unique field
