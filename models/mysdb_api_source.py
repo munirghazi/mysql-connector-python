@@ -831,6 +831,8 @@ class MysdbApiSource(models.Model):
                 continue
             product_name = project.get('projectName') or ''
             product_sku = project.get('categoryName') or ''
+            # Build a stable UUID from projectName + categoryName
+            detail_uuid = f"{product_name}_{product_sku}" if (product_name or product_sku) else ''
             unit_price = project.get('amount')
             if unit_price is None:
                 unit_price = 0.0
@@ -870,6 +872,7 @@ class MysdbApiSource(models.Model):
                         'quantity': quantity,
                         'created_at': detail_created_at,
                         'store_id': detail_store_id,
+                        'order_detail_uuid': detail_uuid,
                     }
                     if existing:
                         existing.write(vals)
