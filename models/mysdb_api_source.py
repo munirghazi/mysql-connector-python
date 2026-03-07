@@ -957,13 +957,24 @@ class MysdbApiSource(models.Model):
     @classmethod
     def _detail_sync_in_background(cls, dbname, uid, rec_ids):
         """Execute detail sync in a new cursor / environment.
-        Also releases the sync lock set by action_sync_details()."""
+        Also releases the sync lock set by action_sync_details().
+
+        A PostgreSQL advisory lock prevents this from running concurrently
+        with the cron worker on the same source.
+        """
         try:
             registry = odoo.registry(dbname)
             with registry.cursor() as cr:
                 env = odoo.api.Environment(cr, uid, {})
                 sources = env['mysdb.api.source'].browse(rec_ids).exists()
                 for rec in sources:
+                    # Advisory lock – prevent concurrent run with cron worker
+                    if not rec._try_sync_advisory_lock():
+                        _logger.info(
+                            "Background detail thread skipping %s – cron worker already processing",
+                            rec.name,
+                        )
+                        continue
                     try:
                         rec._do_sync_details()
                     except Exception as e:
@@ -990,6 +1001,7 @@ class MysdbApiSource(models.Model):
                         # Release the sync lock set by action_sync_details
                         if not rec._is_cursor_dead():
                             rec._release_sync_lock()
+                        rec._release_sync_advisory_lock()
                 if not cls._check_cursor_dead(cr):
                     cr.commit()
         except Exception as e:
@@ -1780,6 +1792,9 @@ class MysdbApiSource(models.Model):
         1. Main sync (with auto-resume)
         2. Detail sync (if enabled)
         3. Lock release
+
+        A PostgreSQL advisory lock prevents this from running concurrently
+        with the cron worker on the same source.
         """
         try:
             registry = odoo.registry(dbname)
@@ -1787,7 +1802,7 @@ class MysdbApiSource(models.Model):
                 env = odoo.api.Environment(cr, uid, {})
                 sources = env['mysdb.api.source'].browse(rec_ids).exists()
                 for rec in sources:
-                    # Guard: if the cron worker already completed this job,
+                    # Guard 1: if the cron worker already completed this job,
                     # sync_in_progress will be False.  Skip to avoid double-run.
                     rec.invalidate_recordset()  # re-read from DB
                     if not rec.sync_in_progress:
@@ -1796,6 +1811,16 @@ class MysdbApiSource(models.Model):
                             rec.name,
                         )
                         continue
+
+                    # Guard 2: advisory lock – prevents concurrent run with
+                    # the cron worker even when sync_in_progress is still True.
+                    if not rec._try_sync_advisory_lock():
+                        _logger.info(
+                            "Background thread skipping %s – cron worker already processing (advisory lock held)",
+                            rec.name,
+                        )
+                        continue
+
                     main_ok = False
                     try:
                         # --- Step 1: main sync ---
@@ -1832,6 +1857,7 @@ class MysdbApiSource(models.Model):
                         # Only release lock if cursor is still alive
                         if not rec._is_cursor_dead():
                             rec._release_sync_lock()
+                        rec._release_sync_advisory_lock()
                 if not cls._check_cursor_dead(cr):
                     cr.commit()
         except Exception as e:
@@ -1879,6 +1905,41 @@ class MysdbApiSource(models.Model):
             return False
         except Exception:
             return True
+
+    # ------------------------------------------------------------------
+    #  Advisory-lock helpers – prevent cron + background thread double-run
+    # ------------------------------------------------------------------
+    # Namespace constant so our advisory locks don't collide with other code.
+    _SYNC_ADVISORY_NS = 424242
+
+    def _try_sync_advisory_lock(self):
+        """Try to acquire a session-level PostgreSQL advisory lock for this
+        source's sync.  Returns True if acquired, False if another DB
+        session (i.e. the other worker) already holds it.
+
+        Advisory locks survive COMMITs (unlike FOR UPDATE), so the lock
+        stays held for the entire duration of the sync regardless of
+        intermediate commits per page.
+        """
+        try:
+            self.env.cr.execute(
+                "SELECT pg_try_advisory_lock(%s, %s)",
+                (self._SYNC_ADVISORY_NS, self.id),
+            )
+            result = self.env.cr.fetchone()
+            return bool(result and result[0])
+        except Exception:
+            return False
+
+    def _release_sync_advisory_lock(self):
+        """Release the advisory lock acquired by _try_sync_advisory_lock."""
+        try:
+            self.env.cr.execute(
+                "SELECT pg_advisory_unlock(%s, %s)",
+                (self._SYNC_ADVISORY_NS, self.id),
+            )
+        except Exception:
+            pass  # best-effort; lock is auto-released when session closes
 
     # ------------------------------------------------------------------
     #  Core sync logic (runs inside a dedicated cursor)
@@ -2466,6 +2527,17 @@ class MysdbApiSource(models.Model):
                     _logger.warning("Auto-sync could not acquire lock for %s", src_name)
                     continue
 
+            # --- Advisory lock: prevent concurrent run with background thread ---
+            # For triggered sources, action_sync() started both the cron and a
+            # background thread.  The advisory lock ensures only one of them
+            # actually performs the work.
+            if not src._try_sync_advisory_lock():
+                _logger.info(
+                    "Auto-sync skipped for %s – advisory lock held by another worker",
+                    src_name,
+                )
+                continue
+
             # --- Pre-set next_run BEFORE starting sync ---
             # This prevents the source from being re-triggered immediately
             # if the cursor dies during sync.
@@ -2477,6 +2549,7 @@ class MysdbApiSource(models.Model):
                 if self._is_cursor_dead():
                     self._cron_cleanup_source(dbname, uid, src_id,
                                               "Cursor died while pre-setting next_run")
+                    src._release_sync_advisory_lock()
                     continue
 
             try:
@@ -2504,10 +2577,12 @@ class MysdbApiSource(models.Model):
                                 dbname, uid, src_id,
                                 "Cursor died during main sync. Error: %s" % str(e)[:300],
                             )
+                            # Advisory lock released when cursor/session dies
                             continue  # move to next source
                         # Cursor alive → release lock and skip detail sync
                         try:
                             src._release_sync_lock()
+                            src._release_sync_advisory_lock()
                             self.env.cr.commit()
                         except Exception:
                             pass
@@ -2531,12 +2606,14 @@ class MysdbApiSource(models.Model):
                                     dbname, uid, src_id,
                                     "Cursor died during detail sync. Error: %s" % str(e)[:300],
                                 )
+                                # Advisory lock released when cursor/session dies
                                 continue
 
                 # --- Step 3: release lock ---
                 if not self._is_cursor_dead():
                     try:
                         src._release_sync_lock()
+                        src._release_sync_advisory_lock()
                         self.env.cr.commit()
                         _logger.info("Auto-sync finished for %s – lock released", src_name)
                     except Exception:
@@ -2551,6 +2628,7 @@ class MysdbApiSource(models.Model):
                 if not self._is_cursor_dead():
                     try:
                         src._release_sync_lock()
+                        src._release_sync_advisory_lock()
                         self.env.cr.commit()
                     except Exception:
                         self._cron_cleanup_source(dbname, uid, src_id)
