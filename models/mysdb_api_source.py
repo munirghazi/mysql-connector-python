@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import gc
 import json
 import threading
 import time
@@ -207,6 +208,30 @@ class MysdbApiSource(models.Model):
     )
     detail_last_sync_message = fields.Text('Detail Sync Message', readonly=True)
     detail_last_sync_count = fields.Integer('Detail Sync Count', readonly=True)
+
+    # ------------------------------------------------------------------
+    #  Product matching – for Jood/Bayan projectList → product lookup
+    # ------------------------------------------------------------------
+    product_match_enabled = fields.Boolean(
+        'Auto-match Products', default=False,
+        help="When enabled, order details from projectList are automatically "
+             "matched to mysdb.product records by comparing the cleaned "
+             "project name against product_name_ar."
+    )
+    product_match_strip_suffixes = fields.Text(
+        'Strip Suffixes (one per line)',
+        default='تبرع سريع\nتسويق\nإعادة استهداف',
+        help="Suffixes to strip from projectName before matching against "
+             "product_name_ar. One suffix per line.\n"
+             "Example: if projectName is 'إفطار صائم - رؤيا - تبرع سريع' "
+             "and this list contains 'تبرع سريع', it becomes "
+             "'إفطار صائم - رؤيا' for matching.\n"
+             "The ' - ' dash separator before each suffix is stripped automatically."
+    )
+    product_match_strip_quotes = fields.Boolean(
+        'Strip Surrounding Quotes', default=True,
+        help="Remove leading/trailing quotes from projectName before matching."
+    )
 
     def _build_request_url(self, page=None):
         url = (self.request_url or '').strip()
@@ -788,6 +813,83 @@ class MysdbApiSource(models.Model):
             )
         return created, updated
 
+    @staticmethod
+    def _clean_product_name(name, suffixes=None, strip_quotes=True):
+        """Strip configurable suffixes from a projectName so it can be matched
+        against mysdb.product.product_name_ar.
+
+        The Jood API appends marketing/campaign suffixes to project names:
+          "إفطار صائم - رؤيا - تبرع سريع"  → cleaned to "إفطار صائم - رؤيا"
+          '" إفطار صائم " - رؤيا - تسويق'   → cleaned to "إفطار صائم - رؤيا"
+
+        Args:
+            name: raw projectName from the API
+            suffixes: list of suffix strings to strip (e.g. ['تبرع سريع', 'تسويق']).
+                      Each suffix is removed together with its preceding ' - ' dash.
+                      Stripping is applied repeatedly from right to left.
+            strip_quotes: if True, remove surrounding quotes from the name.
+        """
+        if not name:
+            return ''
+        import re as _re
+        cleaned = name
+        # 1. Optionally strip surrounding quotes (Arabic or Latin)
+        if strip_quotes:
+            cleaned = _re.sub(r'^[\s"\'""]+|[\s"\'""]+$', '', cleaned)
+        # 2. Strip each configured suffix (with its preceding dash) from the end
+        #    Applied repeatedly so chained suffixes are handled:
+        #    "name - رؤيا - تبرع سريع" with suffixes=['تبرع سريع'] → "name - رؤيا"
+        if suffixes:
+            changed = True
+            while changed:
+                changed = False
+                for sfx in suffixes:
+                    sfx = sfx.strip()
+                    if not sfx:
+                        continue
+                    pattern = r'\s*[-–—]\s*' + _re.escape(sfx) + r'\s*$'
+                    new_cleaned = _re.sub(pattern, '', cleaned)
+                    if new_cleaned != cleaned:
+                        cleaned = new_cleaned
+                        changed = True
+        # 3. Strip trailing quotes/whitespace again and collapse spaces
+        if strip_quotes:
+            cleaned = _re.sub(r'^[\s"\'""]+|[\s"\'""]+$', '', cleaned)
+        cleaned = _re.sub(r'\s+', ' ', cleaned).strip()
+        return cleaned
+
+    def _get_strip_suffixes(self):
+        """Return the list of suffixes to strip, parsed from the
+        product_match_strip_suffixes text field (one per line)."""
+        raw = self.product_match_strip_suffixes or ''
+        return [s.strip() for s in raw.splitlines() if s.strip()]
+
+    def _find_product_by_arabic_name(self, cleaned_name, store_id):
+        """Find a mysdb.product whose product_name_ar matches *cleaned_name*
+        (exact after normalisation) within the given store_id."""
+        if not cleaned_name:
+            return False
+        Product = self.env['mysdb.product'].sudo()
+        import re as _re
+        def _norm(v):
+            if not v:
+                return ''
+            t = str(v).replace('\u00A0', ' ').replace('ـ', ' ')
+            return _re.sub(r'\s+', ' ', t).strip()
+        target = _norm(cleaned_name)
+        if not target:
+            return False
+        # Use first token for ILIKE pre-filter, then exact-compare
+        token = target.split()[0]
+        domain = [('product_name_ar', 'ilike', token)]
+        if store_id:
+            domain.append(('store_id', '=', store_id))
+        candidates = Product.search(domain, limit=100)
+        for cand in candidates:
+            if _norm(cand.product_name_ar) == target:
+                return cand
+        return False
+
     def _sync_project_list(self, item, detail_model):
         project_list = item.get('projectList') or []
         if not isinstance(project_list, list) or not project_list:
@@ -831,6 +933,15 @@ class MysdbApiSource(models.Model):
                 continue
             product_name = project.get('projectName') or ''
             product_sku = project.get('categoryName') or ''
+            # Diagnostic: log raw project keys and full product_name for Bayan
+            _logger.info(
+                "sync_project_list: order=%s raw_keys=%s projectName='%s' (len=%d) categoryName='%s'",
+                order_linked_id,
+                list(project.keys()),
+                product_name,
+                len(product_name),
+                product_sku,
+            )
             # Build a stable UUID from projectName + categoryName
             detail_uuid = f"{product_name}_{product_sku}" if (product_name or product_sku) else ''
             unit_price = project.get('amount')
@@ -874,6 +985,33 @@ class MysdbApiSource(models.Model):
                         'store_id': detail_store_id,
                         'order_detail_uuid': detail_uuid,
                     }
+                    # Auto-match product: strip configurable suffixes and match
+                    # order_detail.product_name → mysdb.product.product_name_ar
+                    if self.product_match_enabled:
+                        suffixes = self._get_strip_suffixes()
+                        cleaned_name = self._clean_product_name(
+                            product_name,
+                            suffixes=suffixes,
+                            strip_quotes=self.product_match_strip_quotes,
+                        )
+                        matched_product = self._find_product_by_arabic_name(
+                            cleaned_name, detail_store_id,
+                        )
+                        if matched_product:
+                            vals['product_id'] = matched_product.product_id
+                            vals['product_ref_id'] = matched_product.id
+                            _logger.debug(
+                                "sync_project_list: matched order=%s name='%s' → product_id=%s "
+                                "(cleaned='%s' product_name_ar='%s')",
+                                order_linked_id, product_name[:60], matched_product.product_id,
+                                cleaned_name[:60], (matched_product.product_name_ar or '')[:60],
+                            )
+                        else:
+                            _logger.warning(
+                                "sync_project_list: no product match for order=%s name='%s' cleaned='%s' store=%s",
+                                order_linked_id, product_name[:60], cleaned_name[:60], detail_store_id,
+                            )
+
                     if existing:
                         existing.write(vals)
                     else:
@@ -2122,6 +2260,16 @@ class MysdbApiSource(models.Model):
                     except Exception:
                         pass
 
+                # Free ORM cache to prevent memory growth across pages.
+                # On Odoo.sh the worker has a hard memory limit; without this,
+                # the cache grows with every page and eventually triggers OOM kill.
+                try:
+                    self.env.invalidate_all()
+                except Exception:
+                    pass
+                if page % 10 == 0:
+                    gc.collect()
+
                 # ----------------------------------------------------------
                 # Progress update – non-critical, in its own mini-transaction.
                 # If this fails (e.g. concurrent update), we just skip it and
@@ -2451,7 +2599,7 @@ class MysdbApiSource(models.Model):
         Odoo.sh due to worker time limits), the method recovers with a fresh
         cursor and continues to the remaining sources instead of aborting.
         """
-        MAX_PAGES = 50000  # safety limit to prevent infinite pagination loops
+        MAX_PAGES = 200  # keep low for Odoo.sh memory limits; resume handles the rest
         now = fields.Datetime.now()
         dbname = self.env.cr.dbname
         uid = self.env.uid
