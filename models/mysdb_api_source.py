@@ -669,7 +669,13 @@ class MysdbApiSource(models.Model):
                     batch_keys = unique_key_set[i:i+200]
                     or_domain = []
                     for key_vals in batch_keys:
-                        sub_domain = [(f, '=', v) for f, v in zip(unique_fields, key_vals)]
+                        leaves = [(f, '=', v) for f, v in zip(unique_fields, key_vals)]
+                        # Wrap multi-leaf conditions with explicit '&' so
+                        # the '|' operator groups them as a single term.
+                        if len(leaves) > 1:
+                            sub_domain = ['&'] * (len(leaves) - 1) + leaves
+                        else:
+                            sub_domain = leaves
                         if or_domain:
                             or_domain = ['|'] + sub_domain + or_domain
                         else:
