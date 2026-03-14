@@ -957,7 +957,7 @@ class MysdbApiSource(models.Model):
             if quantity is None:
                 quantity = 0.0
             try:
-                total = float(unit_price) * float(quantity)
+                total = float(unit_price)
             except (ValueError, TypeError):
                 total = 0.0
 
