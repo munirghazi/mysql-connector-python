@@ -948,8 +948,9 @@ class MysdbApiSource(models.Model):
                 len(product_name),
                 product_sku,
             )
-            # Build a stable UUID from projectName + categoryName
-            detail_uuid = f"{product_name}_{product_sku}" if (product_name or product_sku) else ''
+            detail_uuid = project.get('donationOperationDetailId') or ''
+            if not detail_uuid:
+                detail_uuid = f"{product_name}_{product_sku}" if (product_name or product_sku) else ''
             unit_price = project.get('amount')
             if unit_price is None:
                 unit_price = 0.0
