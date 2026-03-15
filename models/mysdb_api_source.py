@@ -2165,6 +2165,19 @@ class MysdbApiSource(models.Model):
         start_page = page
         is_resuming = resume_page and resume_page > default_start
 
+        # Preemptively mark the sync as "error" so that if the worker is
+        # killed (OOM / timeout / signal 9) before we reach the success
+        # write at the end, the next cron run will see status='error' and
+        # resume from last_sync_page instead of restarting from page 1.
+        try:
+            if not is_resuming:
+                rec.write({'last_sync_status': 'error', 'last_sync_page': 0})
+            else:
+                rec.write({'last_sync_status': 'error'})
+            self.env.cr.commit()
+        except Exception:
+            pass
+
         try:
             _logger.info(
                 "API Sync start: source=%s model=%s pagination=%s start_page=%s "
