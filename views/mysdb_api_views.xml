@@ -120,6 +120,11 @@
                         <field name="detail_last_sync_count" readonly="1"/>
                         <field name="detail_last_sync_message" readonly="1"/>
                     </group>
+                    <group string="Product Matching (Jood/Bayan)">
+                        <field name="product_match_enabled" widget="boolean_toggle"/>
+                        <field name="product_match_strip_suffixes" invisible="not product_match_enabled"/>
+                        <field name="product_match_strip_quotes" invisible="not product_match_enabled"/>
+                    </group>
                     <group string="Dump Raw JSON">
                         <field name="dump_json"/>
                         <field name="dump_directory" invisible="not dump_json"/>

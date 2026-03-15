@@ -118,6 +118,9 @@
             <form string="Link Products">
                 <group>
                     <field name="match_strategy"/>
+                    <field name="strip_bayan_suffix"/>
+                    <field name="strip_suffixes_list" invisible="not strip_bayan_suffix"/>
+                    <field name="strip_quotes" invisible="not strip_bayan_suffix"/>
                     <field name="fallback_to_name"/>
                     <field name="only_missing"/>
                     <field name="overwrite_existing"/>
